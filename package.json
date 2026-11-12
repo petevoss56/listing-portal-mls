@@ -1,0 +1,15 @@
+{
+  "name": "listing-portal-mls",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MLS Grid (MRED) sync and comp-search connector for the 3% Listing Co. Listing Portal and Claude.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

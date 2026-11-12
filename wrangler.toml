@@ -1,0 +1,34 @@
+name = "listing-portal-mls"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# The sync needs more than the free plan's CPU time per run (Workers Paid plan).
+[limits]
+cpu_ms = 300000
+
+# Pull MLS changes every 15 minutes.
+[triggers]
+crons = ["*/15 * * * *"]
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "listing-portal-mls"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[vars]
+ORIGINATING_SYSTEM = "mred"
+# State:County pairs to keep. Everything else in the MRED feed is skipped.
+SERVICE_AREA = "IA:Scott;IL:Rock Island;IL:Henry"
+# People (by key name) who may trigger a manual sync.
+ADMIN_AGENTS = "pete"
+# Property types pulled from MLS Grid (comma-separated).
+SYNC_PROPERTY_TYPES = "Residential"
+SYNC_PAGE_SIZE = "5000"
+SYNC_MAX_PAGES = "20"
+
+# Secrets — set these in the Cloudflare dashboard (Settings > Variables and Secrets), never in this file:
+#   MLSGRID_TOKEN   your MLS Grid access token
+#   CONNECTOR_KEYS  name:key pairs, e.g. pete:<long random key>,chris:<long random key>
