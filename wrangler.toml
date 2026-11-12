@@ -16,7 +16,7 @@ enabled = true
 [[d1_databases]]
 binding = "DB"
 database_name = "listing-portal-mls"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "7ea822ba-7268-45e3-8298-05773ae1eb5a"
 
 [vars]
 ORIGINATING_SYSTEM = "mred"

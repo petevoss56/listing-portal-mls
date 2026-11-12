@@ -26,7 +26,7 @@ The Listing Portal can call the same tools at `POST /api/tools/<tool name>` with
 You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minutes.
 
 1. **Cloudflare plan.** In Cloudflare, switch Workers to the **Workers Paid** plan. The free plan doesn't allow enough processing time per sync run.
-2. **Create the database.** In the Cloudflare dashboard, go to **Storage & Databases → D1**, choose **Create**, and name it `listing-portal-mls`. Copy its **Database ID** and send it to Claude, or paste it into `wrangler.toml` in place of `REPLACE_WITH_YOUR_D1_DATABASE_ID`. The ID isn't a secret.
+2. **Create the database.** In the Cloudflare dashboard, go to **Storage & Databases → D1**, choose **Create**, and name it `listing-portal-mls`. Its Database ID is already in `wrangler.toml`.
 3. **Deploy from GitHub.** In **Workers & Pages**, choose **Create**, then **Import a repository**, and pick `petevoss56/listing-portal-mls`. Keep the default build settings; it reads everything from `wrangler.toml`. Cloudflare redeploys automatically whenever this repo changes.
 4. **Add the two secrets.** In the Worker, go to **Settings → Variables and Secrets** and add two values, both as type **Secret**:
    - `MLSGRID_TOKEN`: your MLS Grid token.
