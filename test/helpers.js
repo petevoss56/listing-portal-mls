@@ -31,7 +31,7 @@ let seq = 0;
 export function rec(o) {
   seq++;
   return Object.assign({
-    ListingKey: 'K' + seq, ListingId: String(12000000 + seq), OriginatingSystemName: 'mred', MlgCanView: true,
+    ListingKey: 'MRDK' + seq, ListingId: 'MRD' + String(12000000 + seq), ListOfficeName: 'Example Realty ' + (seq % 3), OriginatingSystemName: 'mred', MlgCanView: true,
     ModificationTimestamp: new Date(Date.now() - (100 - seq) * 60000).toISOString(), PropertyType: 'Residential',
     PropertySubType: 'Single Family Residence', StateOrProvince: 'IL', CountyOrParish: 'Rock Island', City: 'East Moline',
     PostalCode: '61244', BedroomsTotal: 3, BathroomsFull: 1, BathroomsHalf: 0, GarageSpaces: 1, YearBuilt: 1958,
@@ -75,6 +75,7 @@ export function fakeMlsGrid(records, pageSize, opts) {
   opts = opts || {};
   const calls = [];
   const fetch = async (url, init) => {
+    if (opts.failAfter != null && calls.length >= opts.failAfter) { calls.push({ url }); return new Response('boom', { status: 500 }); }
     calls.push({ url, auth: init && init.headers && init.headers.Authorization });
     if (opts.rejectSelect && url.includes('$select=')) return new Response('bad select', { status: 400 });
     const u = new URL(url);
@@ -84,6 +85,7 @@ export function fakeMlsGrid(records, pageSize, opts) {
     const gt = filter.match(/ModificationTimestamp gt (\S+)/);
     if (gt) pool = pool.filter((r) => r.ModificationTimestamp > gt[1]);
     if (filter.includes('MlgCanView eq true')) pool = pool.filter((r) => r.MlgCanView !== false);
+    if (opts.rejectTypeFilter && filter.includes('PropertyType')) return new Response('bad filter', { status: 400 });
     if (filter.includes("PropertyType eq 'Residential'")) pool = pool.filter((r) => r.PropertyType === 'Residential');
     const page = pool.slice(skip, skip + pageSize);
     const body = { value: page };

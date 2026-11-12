@@ -7,14 +7,14 @@ const SCHEMA = [
     lat REAL, lon REAL, list_price REAL, original_list_price REAL, close_price REAL, close_date TEXT, list_date TEXT,
     dom INTEGER, beds INTEGER, baths_full INTEGER, baths_half INTEGER, living_area REAL, above_grade_sqft REAL,
     below_grade_finished_sqft REAL, garage_spaces REAL, year_built INTEGER, lot_acres REAL, style TEXT, basement TEXT,
-    remarks TEXT, can_use TEXT, modified TEXT, synced_at TEXT)`,
+    remarks TEXT, can_use TEXT, list_office TEXT, modified TEXT, synced_at TEXT)`,
   'CREATE INDEX IF NOT EXISTS idx_listings_state_status ON listings(state, status)',
   'CREATE INDEX IF NOT EXISTS idx_listings_close ON listings(close_date)',
   'CREATE INDEX IF NOT EXISTS idx_listings_mls ON listings(mls_number)',
   'CREATE INDEX IF NOT EXISTS idx_listings_lat ON listings(lat)',
   `CREATE TABLE IF NOT EXISTS sync_state (
     id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT, next_link TEXT, high_water TEXT, run_max TEXT,
-    use_select INTEGER DEFAULT 1, last_run_at TEXT, last_run_pages INTEGER, last_run_upserts INTEGER,
+    use_select INTEGER DEFAULT 1, use_type_filter INTEGER DEFAULT 1, last_run_at TEXT, last_run_pages INTEGER, last_run_upserts INTEGER,
     last_run_deletes INTEGER, last_error TEXT, initial_completed_at TEXT)`,
   'INSERT OR IGNORE INTO sync_state (id, mode, use_select) VALUES (1, \'initial\', 1)',
   `CREATE TABLE IF NOT EXISTS usage_log (
@@ -37,12 +37,13 @@ export const SELECT_FIELDS = [
   'ListPrice', 'OriginalListPrice', 'ClosePrice', 'CloseDate', 'ListingContractDate', 'OnMarketDate', 'DaysOnMarket',
   'CumulativeDaysOnMarket', 'BedroomsTotal', 'BathroomsFull', 'BathroomsHalf', 'LivingArea', 'AboveGradeFinishedArea',
   'BelowGradeFinishedArea', 'GarageSpaces', 'YearBuilt', 'LotSizeAcres', 'ArchitecturalStyle', 'Basement', 'PublicRemarks',
+  'ListOfficeName',
 ];
 
 const COLS = ['listing_key', 'mls_number', 'status', 'property_type', 'property_subtype', 'address', 'street_number', 'street_name',
   'unit', 'city', 'state', 'zip', 'county', 'lat', 'lon', 'list_price', 'original_list_price', 'close_price', 'close_date',
   'list_date', 'dom', 'beds', 'baths_full', 'baths_half', 'living_area', 'above_grade_sqft', 'below_grade_finished_sqft',
-  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'modified', 'synced_at'];
+  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'modified', 'synced_at'];
 
 const pick = (r, ...keys) => {
   for (const k of keys) { const v = r[k]; if (v !== undefined && v !== null && v !== '') return v; }
@@ -52,12 +53,15 @@ const n = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) 
 const list = (v) => (Array.isArray(v) ? v.join(', ') : v == null ? null : String(v));
 const date = (v) => (v ? String(v).slice(0, 10) : null);
 
-export function mapRecord(r, syncedAt) {
+// MLS Grid puts an MLS prefix on key fields (e.g. MRD...). It must be removed before display.
+export const stripPrefix = (v, prefix) => (v == null ? null : prefix && String(v).toUpperCase().startsWith(prefix.toUpperCase()) ? String(v).slice(prefix.length) : String(v));
+
+export function mapRecord(r, syncedAt, prefix) {
   const street = [r.StreetDirPrefix, r.StreetName, r.StreetSuffix, r.StreetDirSuffix].filter(Boolean).join(' ') || null;
   const addr = r.UnparsedAddress || [r.StreetNumber, street].filter(Boolean).join(' ') || null;
   return {
     listing_key: String(r.ListingKey),
-    mls_number: pick(r, 'ListingId'),
+    mls_number: stripPrefix(pick(r, 'ListingId'), prefix),
     status: pick(r, 'StandardStatus'),
     property_type: pick(r, 'PropertyType'),
     property_subtype: pick(r, 'PropertySubType'),
@@ -90,6 +94,7 @@ export function mapRecord(r, syncedAt) {
     basement: list(r.Basement),
     remarks: r.PublicRemarks ? String(r.PublicRemarks).slice(0, 1500) : null,
     can_use: r.MlgCanUse == null ? null : list(r.MlgCanUse),
+    list_office: pick(r, 'ListOfficeName'),
     modified: pick(r, 'ModificationTimestamp'),
     synced_at: syncedAt,
   };

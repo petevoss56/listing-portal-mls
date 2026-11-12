@@ -1,8 +1,11 @@
 // The tools Claude (and the Listing Portal) can call.
 import { runCma, candidates, compSqft } from './cma.js';
 import { geocode } from './geo.js';
-import { listingByMls, searchByAddress, stats, getSyncState, recentUsage } from './db.js';
-import { VERSION } from './config.js';
+import { listingByMls, searchByAddress, stats, getSyncState, recentUsage, stripPrefix } from './db.js';
+import { VERSION, config } from './config.js';
+
+// Every response carries attribution (AI Use Addendum 3(d)) and the permitted-use reminder.
+export const ATTRIBUTION = 'Listing data from MRED (Midwest Real Estate Data), provided via MLS GRID. Each listing is courtesy of the listing office shown. Licensed to 3% Listing Co. for internal brokerage and CMA use; share only the facts needed to support a client\'s estimate of value, with that client only. Do not save this data to memory or reuse it outside this request.';
 
 const subjectProps = {
   address: { type: 'string', description: 'Street address of the subject, e.g. "709 40th Ave"' },
@@ -88,8 +91,9 @@ export const TOOLS = [
 ].map((t) => Object.assign(t, { annotations: { readOnlyHint: true, openWorldHint: false } }));
 
 /** Build the subject from arguments, an MLS record and, as a last resort, the Census geocoder. */
-export async function resolveSubject(db, a, fetchImpl) {
+export async function resolveSubject(db, a, fetchImpl, prefix) {
   let base = null, source = 'as entered';
+  if (a.mls_number) a = Object.assign({}, a, { mls_number: stripPrefix(a.mls_number, prefix) });
   if (a.mls_number) { base = await listingByMls(db, a.mls_number); if (base) source = `MLS #${base.mls_number}`; }
   if (!base && a.address) {
     const hits = await searchByAddress(db, a.address, 5);
@@ -137,17 +141,23 @@ const brief = (x) => ({
   list_date: x.list_date, dom: x.dom, beds: x.beds, baths_full: x.baths_full, baths_half: x.baths_half,
   above_grade_sqft: x.above_grade_sqft, living_area: x.living_area, basement_finished_sqft: x.below_grade_finished_sqft,
   basement: x.basement, garage: x.garage_spaces, year_built: x.year_built, style: x.style, subtype: x.property_subtype, lot_acres: x.lot_acres,
+  listing_office: x.list_office,
 });
 
 export async function callTool(env, name, a, fetchImpl) {
+  const out = await callToolInner(env, name, a || {}, fetchImpl);
+  return out && typeof out === 'object' && !out.error ? Object.assign({ source: ATTRIBUTION }, out) : out;
+}
+
+async function callToolInner(env, name, a, fetchImpl) {
   const db = env.DB;
-  a = a || {};
+  const cfg = config(env);
   if (name === 'run_cma' || name === 'find_sold_comps' || name === 'find_active_listings') {
-    const { subj, problems } = await resolveSubject(db, a, fetchImpl);
+    const { subj, problems } = await resolveSubject(db, a, fetchImpl, cfg.keyPrefix);
     if (problems.length) return { error: 'Need more about the subject: ' + problems.join('; ') + '.', subject_so_far: subj };
     if (name === 'run_cma') {
       return runCma(db, subj, {
-        overrides: a.comp_grades, exclude: a.exclude_mls, include: a.include_mls, months: a.months,
+        overrides: a.comp_grades, exclude: (a.exclude_mls || []).map((m) => stripPrefix(m, cfg.keyPrefix)), include: (a.include_mls || []).map((m) => stripPrefix(m, cfg.keyPrefix)), months: a.months,
         maxRadius: a.max_radius_miles, kind: a.property_kind,
       });
     }
@@ -159,18 +169,18 @@ export async function callTool(env, name, a, fetchImpl) {
     return {
       subject: { address: subj.address, state: subj.state, sqft: subj.sqft, facts_source: subj.source, assumed: subj.assumed },
       count: list.length,
-      results: list.slice(0, a.limit || 15).map((x) => Object.assign(brief(x.row), {
+      results: list.slice(0, Math.min(a.limit || 15, cfg.maxResults)).map((x) => Object.assign(brief(x.row), {
         distance_mi: Math.round(x.d * 100) / 100, price_per_sqft: x.a.ppsf ? Math.round(x.a.ppsf) : null,
         adjustment_total: Math.round(x.a.total), indicated_value: x.a.indicated ? Math.round(x.a.indicated / 500) * 500 : null, flags: x.flags,
       })),
     };
   }
   if (name === 'get_listing') {
-    const r = await listingByMls(db, a.mls_number);
+    const r = await listingByMls(db, stripPrefix(a.mls_number, cfg.keyPrefix));
     return r ? Object.assign(brief(r), { remarks: r.remarks, county: r.county, modified: r.modified }) : { error: `No listing with MLS #${a.mls_number} in the Quad Cities copy.` };
   }
   if (name === 'search_listings_by_address') {
-    const rows = await searchByAddress(db, a.address, a.limit || 10);
+    const rows = await searchByAddress(db, a.address, Math.min(a.limit || 10, cfg.maxResults));
     return { count: rows.length, results: rows.map(brief) };
   }
   if (name === 'sync_status') {

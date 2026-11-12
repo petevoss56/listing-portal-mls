@@ -1,7 +1,9 @@
-// MLS Grid replication. MLS Grid does not answer live searches, so we keep our own copy:
-//  - first run(s): full import of viewable records (MlgCanView eq true), resumable across runs
-//  - afterwards: only records changed since the newest ModificationTimestamp we have
-//  - records flagged MlgCanView = false are deleted locally, as MLS Grid requires
+// MLS Grid replication, following the MLS Grid "Best Practices for Obtaining Data" guide:
+//  - Initial import: OriginatingSystemName eq 'mred' and MlgCanView eq true, following @odata.nextLink.
+//  - Never start over after an error: resume with "ModificationTimestamp gt <greatest received so far>".
+//  - Afterwards, every 15 minutes: "ModificationTimestamp gt <greatest in our database>" (no MlgCanView filter),
+//    so records MLS Grid marks MlgCanView = false arrive and are deleted locally.
+//  - One request at a time, at most 2 per second, gzip, no parentheses except around "in"/"or".
 // Only listings inside SERVICE_AREA are stored.
 import { config, normCounty, QC_CITIES } from './config.js';
 import { ensureSchema, getSyncState, saveSyncState, mapRecord, upsertRows, deleteKeys, SELECT_FIELDS } from './db.js';
@@ -13,13 +15,17 @@ export function inServiceArea(rec, area) {
   return (QC_CITIES[st] || []).includes(String(rec.City || '').toLowerCase().trim());
 }
 
-export function buildUrl(cfg, { mode, highWater, useSelect }) {
+export function buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter }) {
   const f = [`OriginatingSystemName eq '${cfg.source}'`];
-  if (cfg.propertyTypes.length) f.push('(' + cfg.propertyTypes.map((t) => `PropertyType eq '${t}'`).join(' or ') + ')');
-  if (mode === 'incremental' && highWater) f.push(`ModificationTimestamp gt ${highWater}`);
-  else f.push('MlgCanView eq true');
+  if (useTypeFilter !== false && cfg.propertyTypes.length) {
+    f.push(cfg.propertyTypes.length === 1
+      ? `PropertyType eq '${cfg.propertyTypes[0]}'`
+      : `PropertyType in (${cfg.propertyTypes.map((t) => `'${t}'`).join(',')})`);
+  }
+  if (mode !== 'incremental') f.push('MlgCanView eq true');
+  if (checkpoint) f.push(`ModificationTimestamp gt ${checkpoint}`);
   const params = [`$filter=${encodeURIComponent(f.join(' and '))}`, `$top=${cfg.pageSize}`];
-  if (useSelect) params.push(`$select=${SELECT_FIELDS.join(',')}`);
+  if (useSelect !== false) params.push(`$select=${SELECT_FIELDS.join(',')}`);
   return `${cfg.base}/Property?${params.join('&')}`;
 }
 
@@ -34,65 +40,63 @@ export async function runSync(env, opts) {
   const maxPages = opts.maxPages || cfg.maxPages;
   const started = Date.now();
   await ensureSchema(db);
+  const now = new Date().toISOString();
   if (!cfg.token) {
-    await saveSyncState(db, { last_run_at: new Date().toISOString(), last_error: 'MLSGRID_TOKEN is not set' });
+    await saveSyncState(db, { last_run_at: now, last_error: 'MLSGRID_TOKEN is not set' });
     return { ok: false, error: 'MLSGRID_TOKEN is not set' };
   }
 
-  let st = await getSyncState(db);
-  let mode = st.high_water ? 'incremental' : 'initial';
+  const st = await getSyncState(db);
+  const mode = st.mode === 'incremental' ? 'incremental' : 'initial';
   let useSelect = st.use_select !== 0;
-  let url = st.next_link || buildUrl(cfg, { mode, highWater: st.high_water, useSelect });
-  let runMax = st.run_max || null;
+  let useTypeFilter = st.use_type_filter !== 0;
+  let checkpoint = st.high_water || null; // greatest ModificationTimestamp received so far
+  const fresh = () => buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter });
+  let url = fresh();
+  let firstPage = true;
   let pages = 0, upserts = 0, deletes = 0, error = null, finished = false;
-  const now = new Date().toISOString();
 
   while (pages < maxPages && Date.now() - started < cfg.timeBudgetMs) {
     let res;
     try {
-      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${cfg.token}`, 'Accept-Encoding': 'gzip' } });
+      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${cfg.token}`, 'Accept-Encoding': 'gzip, deflate' } });
     } catch (e) { error = 'Network error: ' + e.message; break; }
     pages++;
-    if (res.status === 400 && useSelect && !st.next_link) {
-      // Field list not accepted: fall back to full records and remember that.
-      useSelect = false;
-      await saveSyncState(db, { use_select: 0 });
-      url = buildUrl(cfg, { mode, highWater: st.high_water, useSelect });
+    if (res.status === 400 && firstPage && (useTypeFilter || useSelect)) {
+      // Request shape not accepted: drop the property-type filter first, then the field list, and remember.
+      if (useTypeFilter && cfg.propertyTypes.length) { useTypeFilter = false; await saveSyncState(db, { use_type_filter: 0 }); }
+      else { useSelect = false; await saveSyncState(db, { use_select: 0 }); }
+      url = fresh();
       continue;
     }
-    if (res.status === 429) { error = 'MLS Grid rate limit reached (429). Will resume next run.'; break; }
+    if (res.status === 429) { error = 'MLS Grid rate limit reached (429). Will resume from the checkpoint next run.'; break; }
     if (!res.ok) {
-      const body = (await res.text().catch(() => '')).slice(0, 300);
-      error = `MLS Grid returned ${res.status}: ${body}`;
-      if (st.next_link) await saveSyncState(db, { next_link: null }); // stale page link: restart from the last checkpoint
-      break;
+      error = `MLS Grid returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`;
+      break; // next run resumes from the saved checkpoint; never starts over
     }
+    firstPage = false;
     const json = await res.json();
-    const records = json.value || [];
     const keep = [], drop = [];
-    for (const r of records) {
-      runMax = maxTs(runMax, r.ModificationTimestamp);
+    let pageMax = null;
+    for (const r of json.value || []) {
+      pageMax = maxTs(pageMax, r.ModificationTimestamp);
       if (r.MlgCanView === false) drop.push(String(r.ListingKey));
-      else if (inServiceArea(r, cfg.serviceArea)) keep.push(mapRecord(r, now));
+      else if (inServiceArea(r, cfg.serviceArea) && (!cfg.propertyTypes.length || useTypeFilter || cfg.propertyTypes.includes(r.PropertyType))) keep.push(mapRecord(r, now, cfg.keyPrefix));
     }
     if (keep.length) await upsertRows(db, keep);
     if (drop.length) await deleteKeys(db, drop);
     upserts += keep.length; deletes += drop.length;
+    checkpoint = maxTs(checkpoint, pageMax);
+    await saveSyncState(db, { high_water: checkpoint });
 
-    const next = json['@odata.nextLink'] || null;
-    if (next) {
-      await saveSyncState(db, { next_link: next, run_max: runMax, mode });
-      st = Object.assign(st, { next_link: next });
-      url = next;
-      await sleep(cfg.requestGapMs);
-    } else {
-      const hw = maxTs(st.high_water, runMax);
-      const patch = { next_link: null, run_max: null, high_water: hw, mode: 'incremental' };
-      if (mode === 'initial') patch.initial_completed_at = now;
-      await saveSyncState(db, patch);
+    const next = json['@odata.nextLink'];
+    if (!next) {
+      if (mode === 'initial') await saveSyncState(db, { mode: 'incremental', initial_completed_at: now });
       finished = true;
       break;
     }
+    url = next;
+    await sleep(cfg.requestGapMs);
   }
   await saveSyncState(db, { last_run_at: now, last_run_pages: pages, last_run_upserts: upserts, last_run_deletes: deletes, last_error: error });
   return { ok: !error, mode, pages, upserts, deletes, finished, error };

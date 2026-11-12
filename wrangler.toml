@@ -24,6 +24,12 @@ ORIGINATING_SYSTEM = "mred"
 SERVICE_AREA = "IA:Scott;IL:Rock Island;IL:Henry"
 # People (by key name) who may trigger a manual sync.
 ADMIN_AGENTS = "pete"
+# Set to "false" to cut off Claude's access to MLS data immediately (the Listing Portal API keeps working).
+AI_ACCESS_ENABLED = "true"
+# MLS Grid key prefix for MRED, removed before display.
+KEY_PREFIX = "MRD"
+# Largest number of listings returned by one search.
+MAX_RESULTS = "25"
 # Property types pulled from MLS Grid (comma-separated).
 SYNC_PROPERTY_TYPES = "Residential"
 SYNC_PAGE_SIZE = "5000"

@@ -60,10 +60,38 @@ test('a page limit pauses the import and the next run resumes where it stopped',
   const grid = fakeMlsGrid(recs, 3);
   const r1 = await runSync(env, { fetch: grid.fetch, sleep: async () => {}, maxPages: 2 });
   assert.equal(r1.finished, false);
-  assert.ok((await getSyncState(env.DB)).next_link);
+  const mid = await getSyncState(env.DB);
+  assert.equal(mid.mode, 'initial');
+  assert.ok(mid.high_water, 'checkpoint saved after each page');
   const r2 = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
   assert.equal(r2.finished, true);
+  const resumeUrl = decodeURIComponent(grid.calls[2].url);
+  assert.ok(resumeUrl.includes('MlgCanView eq true') && resumeUrl.includes('ModificationTimestamp gt ' + mid.high_water), 'resumes, never starts over');
   assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM listings').first()).n, recs.length - 1);
+});
+
+test('an error mid-import keeps the checkpoint and the next run resumes from it', async () => {
+  const env = makeEnv();
+  const recs = fixtureRecords();
+  const r1 = await runSync(env, { fetch: fakeMlsGrid(recs, 4, { failAfter: 2 }).fetch, sleep: async () => {} });
+  assert.equal(r1.ok, false);
+  const cp = (await getSyncState(env.DB)).high_water;
+  assert.ok(cp);
+  const grid = fakeMlsGrid(recs, 4);
+  const r2 = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  assert.equal(r2.finished, true);
+  assert.ok(decodeURIComponent(grid.calls[0].url).includes('ModificationTimestamp gt ' + cp));
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM listings').first()).n, recs.length - 1);
+});
+
+test('falls back without the property-type filter if MLS Grid rejects it, still keeping only residential', async () => {
+  const env = makeEnv();
+  const recs = fixtureRecords().concat([Object.assign({}, fixtureRecords()[1], { ListingKey: 'MRDLAND', ListingId: 'MRD99', PropertyType: 'Land' })]);
+  const grid = fakeMlsGrid(recs, 50, { rejectTypeFilter: true });
+  const r = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  assert.equal(r.ok, true);
+  assert.equal((await getSyncState(env.DB)).use_type_filter, 0);
+  assert.equal(await env.DB.prepare("SELECT * FROM listings WHERE listing_key = 'MRDLAND'").first(), null);
 });
 
 test('falls back to full records if MLS Grid rejects the field list', async () => {
@@ -93,7 +121,11 @@ test('buildUrl uses the configured source and page size', () => {
   assert.ok(u.startsWith('https://api.mlsgrid.com/v2/Property?'));
   assert.ok(u.includes('$top=5000'));
   assert.ok(u.includes('$select=ListingKey'));
-  assert.ok(decodeURIComponent(u).includes("(PropertyType eq 'Residential')"));
+  assert.ok(decodeURIComponent(u).includes("PropertyType eq 'Residential' and"));
+  assert.ok(!decodeURIComponent(u).includes('('), 'no parentheses around single conditions');
+  const multi = buildUrl(config({ SYNC_PROPERTY_TYPES: 'Residential,Residential Income' }), { mode: 'incremental', checkpoint: '2026-01-01T00:00:00.000Z' });
+  assert.ok(decodeURIComponent(multi).includes("PropertyType in ('Residential','Residential Income')"));
+  assert.ok(!decodeURIComponent(multi).split('&$top')[0].includes('MlgCanView eq true'), 'incremental requests include deletions');
 });
 
 test('MCP: keys are required and per-person', async () => {
@@ -186,6 +218,23 @@ test('find tools, lookups and status', async () => {
   const st = (await callTool(env, 'sync_status', {})).data;
   assert.equal(st.records.total, 15);
   assert.ok(st.recent_usage.length >= 1);
+});
+
+test('license safeguards: prefixes stripped, attribution included, kill switch, result cap', async () => {
+  const { env } = await synced();
+  const one = (await callTool(env, 'get_listing', { mls_number: 'MRD12000009' })).data;
+  assert.equal(one.mls_number, '12000009', 'MLS prefix removed for display and accepted on input');
+  assert.ok(one.listing_office);
+  assert.match(one.source, /MRED.*MLS GRID/);
+  const cma = (await callTool(env, 'run_cma', SUBJECT)).data;
+  assert.ok(cma.sold_comps.every((c) => c.listing_office));
+  const capped = (await callTool(env, 'find_sold_comps', Object.assign({}, SUBJECT, { limit: 500, radius_miles: 5, months: 60 }))).data;
+  assert.ok(capped.results.length <= 25);
+  env.AI_ACCESS_ENABLED = 'false';
+  const off = await mcp(env, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  assert.equal(off.status, 403);
+  const portal = await worker.fetch(new Request('https://x.test/api/tools/get_listing', { method: 'POST', headers: { Authorization: 'Bearer pete-key-0123456789abcdef' }, body: JSON.stringify({ mls_number: '12000009' }) }), env);
+  assert.equal(portal.status, 200, 'portal keeps working when AI access is off');
 });
 
 test('portal API and admin sync permissions', async () => {

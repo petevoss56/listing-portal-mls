@@ -79,7 +79,7 @@ function describe(c, d, a, price) {
     distance_mi: Math.round(d * 100) / 100,
     sqft: a.sqft, sqft_source: a.sqftSource, beds: c.beds, baths_full: c.baths_full, baths_half: c.baths_half,
     garage: c.garage_spaces, basement_finished_sqft: c.below_grade_finished_sqft, year_built: c.year_built,
-    style: c.style, price_per_sqft: a.ppsf ? Math.round(a.ppsf) : null,
+    style: c.style, listing_office: c.list_office, price_per_sqft: a.ppsf ? Math.round(a.ppsf) : null,
     grade_used: a.grade,
     adjustments: { condition: a.cond, full_bath: a.full, half_bath: a.half, garage: a.garage, basement: Math.round(a.bsmt), total: Math.round(a.total) },
     indicated_value: a.indicated ? round(a.indicated, 500) : null,
@@ -210,7 +210,7 @@ export async function runCma(db, subj, opts) {
     sold_comps: soldPick.map((x) => Object.assign(describe(x.row, x.d, x.a, x.price), { weight_pct: x.a.indicated ? share(x) : 0, flags: x.flags })),
     active_competition: activePick.map((x) => Object.assign(describe(x.row, x.d, x.a, x.price), { flags: x.flags })),
     pending: pending.map((x) => describe(x.row, x.d, x.a, x.price)),
-    top_competitors: competitors.map((x) => ({ mls_number: x.row.mls_number, address: x.row.address, list_price: x.price, dom: x.row.dom, sqft: x.a.sqft })),
+    top_competitors: competitors.map((x) => ({ mls_number: x.row.mls_number, address: x.row.address, list_price: x.price, dom: x.row.dom, sqft: x.a.sqft, listing_office: x.row.list_office })),
     method: 'Indicated value = (price + feature adjustments) ÷ comp sq ft × subject sq ft, weighted toward closer, more similar, more recent sales.',
   };
 }

@@ -34,7 +34,10 @@ export default {
     if (!agent) return json({ error: 'Missing or invalid key.' }, 401);
     await ensureSchema(env.DB);
 
-    if (url.pathname === '/mcp') return handleMcp(request, env, agent);
+    if (url.pathname === '/mcp') {
+      if (!config(env).aiEnabled) return json({ error: 'AI access to MLS data is turned off (AI_ACCESS_ENABLED=false).' }, 403);
+      return handleMcp(request, env, agent);
+    }
 
     if (url.pathname.startsWith('/api/tools/') && request.method === 'POST') {
       const name = url.pathname.slice('/api/tools/'.length);
