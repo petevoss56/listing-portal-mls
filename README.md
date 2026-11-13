@@ -53,7 +53,8 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 | `AI_ACCESS_ENABLED` | `true` | Set to `false` to cut off Claude's access immediately (the Listing Portal API keeps working) |
 | `KEY_PREFIX` | `MRD` | MLS Grid prefix on MRED key fields, removed before display |
 | `MAX_RESULTS` | `25` | Most listings any one search returns |
-| `SYNC_PAGE_SIZE` / `SYNC_MAX_PAGES` | `5000` / `20` | Records per request / requests per run |
+| `SYNC_PAGE_SIZE` / `SYNC_MAX_PAGES` | `5000` / `10` | Records per request / requests per 15-minute run (at most 40 requests an hour) |
+| `ALLOW_LARGER_REQUESTS` | `false` | Whether to retry with bigger full-record downloads if MLS Grid rejects the slim request |
 
 ## How the valuation works
 

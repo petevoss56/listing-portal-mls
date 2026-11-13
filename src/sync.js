@@ -63,7 +63,12 @@ export async function runSync(env, opts) {
     } catch (e) { error = 'Network error: ' + e.message; break; }
     pages++;
     if (res.status === 400 && firstPage && (useTypeFilter || useSelect)) {
-      // Request shape not accepted: drop the property-type filter first, then the field list, and remember.
+      // Request shape not accepted. Falling back means downloading much more data, so it is off unless
+      // ALLOW_LARGER_REQUESTS = "true" (keeps us far inside MLS Grid's hourly data caps by default).
+      if (!cfg.allowLarger) {
+        error = 'MLS Grid rejected the request (400). Larger fallback requests are turned off (ALLOW_LARGER_REQUESTS). ' + (await res.text().catch(() => '')).slice(0, 200);
+        break;
+      }
       if (useTypeFilter && cfg.propertyTypes.length) { useTypeFilter = false; await saveSyncState(db, { use_type_filter: 0 }); }
       else { useSelect = false; await saveSyncState(db, { use_select: 0 }); }
       url = fresh();

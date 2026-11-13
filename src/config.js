@@ -16,7 +16,8 @@ export function config(env) {
     pageSize: num(env.SYNC_PAGE_SIZE, 5000),
     // MLS Grid lets us filter by PropertyType on its side (max 5 'or's). Empty = all types.
     propertyTypes: (env.SYNC_PROPERTY_TYPES ?? 'Residential').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 6),
-    maxPages: num(env.SYNC_MAX_PAGES, 20),
+    maxPages: num(env.SYNC_MAX_PAGES, 10),
+    allowLarger: String(env.ALLOW_LARGER_REQUESTS ?? 'false').toLowerCase() === 'true',
     timeBudgetMs: num(env.SYNC_TIME_BUDGET_MS, 12 * 60 * 1000),
     requestGapMs: num(env.SYNC_REQUEST_GAP_MS, 600), // MLS Grid allows 2 requests/second
     adminAgents: (env.ADMIN_AGENTS || 'pete').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),

@@ -102,6 +102,15 @@ test('falls back to full records if MLS Grid rejects the field list', async () =
   assert.equal((await getSyncState(env.DB)).use_select, 0);
 });
 
+test('by default a rejected request stops instead of falling back to larger downloads', async () => {
+  const env = makeEnv({ ALLOW_LARGER_REQUESTS: 'false' });
+  const grid = fakeMlsGrid(fixtureRecords(), 50, { rejectSelect: true });
+  const r = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  assert.equal(r.ok, false);
+  assert.equal(grid.calls.length, 1);
+  assert.match(r.error, /ALLOW_LARGER_REQUESTS/);
+});
+
 test('missing token is reported, not thrown', async () => {
   const env = makeEnv({ MLSGRID_TOKEN: '' });
   const r = await runSync(env, { fetch: async () => { throw new Error('should not call'); } });

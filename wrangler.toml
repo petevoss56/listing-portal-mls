@@ -33,7 +33,10 @@ MAX_RESULTS = "25"
 # Property types pulled from MLS Grid (comma-separated).
 SYNC_PROPERTY_TYPES = "Residential"
 SYNC_PAGE_SIZE = "5000"
-SYNC_MAX_PAGES = "20"
+# Requests per 15-minute run. 10 = at most 40 requests/hour (MLS Grid allows 7,200/hour).
+SYNC_MAX_PAGES = "10"
+# If MLS Grid rejects our slimmed-down request, retry with bigger full-record requests? Off by default to stay well under data caps.
+ALLOW_LARGER_REQUESTS = "false"
 
 # Secrets — set these in the Cloudflare dashboard (Settings > Variables and Secrets), never in this file:
 #   MLSGRID_TOKEN   your MLS Grid access token
