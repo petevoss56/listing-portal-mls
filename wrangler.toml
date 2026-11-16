@@ -38,7 +38,7 @@ SYNC_MAX_PAGES = "10"
 # Requests per run while the FIRST import is still running. Raise to "300" only while MLS Grid has
 # granted an initial-import grace period; runs still stay at 2 requests/second and one at a time.
 # After the first import finishes, every run automatically uses SYNC_MAX_PAGES again.
-INITIAL_IMPORT_MAX_PAGES = "10"
+INITIAL_IMPORT_MAX_PAGES = "300"
 # If MLS Grid rejects our slimmed-down request, retry with bigger full-record requests? Off by default to stay well under data caps.
 ALLOW_LARGER_REQUESTS = "false"
 
