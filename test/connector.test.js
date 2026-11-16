@@ -163,6 +163,18 @@ test('a missing core field stops the sync with a clear error', async () => {
   assert.equal(r.ok, false);
 });
 
+test('basement rate: $35/sf over 30 years old, $70/sf otherwise, each home at its own rate', async () => {
+  const { adjust } = await import('../src/cma.js');
+  const yr = new Date().getFullYear();
+  const subj = { sqft: 1500, grade: 'C', full: 2, half: 0, garage: 2, bsmt: 0, year: yr - 10, state: 'IA' };
+  const newComp = { above_grade_sqft: 1500, baths_full: 2, baths_half: 0, garage_spaces: 2, below_grade_finished_sqft: 500, year_built: yr - 10 };
+  assert.equal(adjust(subj, newComp, 300000).bsmt, -35000);
+  const oldComp = Object.assign({}, newComp, { year_built: yr - 40 });
+  assert.equal(adjust(subj, oldComp, 300000).bsmt, -17500);
+  assert.equal(adjust(Object.assign({}, subj, { bsmt: 500, year: yr - 40 }), oldComp, 300000).bsmt, 0);
+  assert.equal(adjust(subj, Object.assign({}, newComp, { year_built: yr - 30 }), 300000).bsmt, -35000, 'exactly 30 years uses $70');
+});
+
 test('missing token is reported, not thrown', async () => {
   const env = makeEnv({ MLSGRID_TOKEN: '' });
   const r = await runSync(env, { fetch: async () => { throw new Error('should not call'); } });
@@ -234,7 +246,7 @@ test('run_cma on 709 40th Ave: Illinois-only comps, rules applied, range and con
   assert.ok(!data.sold_comps.some((c) => /^777 39th/.test(c.address)), 'IDX-only record not used for Back Office comps');
   assert.ok(!data.sold_comps.some((c) => c.flags.includes('Bedroom count outside range')), 'bedroom rule enforced');
   const s8 = data.sold_comps.find((c) => /3916 8th/.test(c.address));
-  assert.equal(s8.adjustments.basement, -23520, 'basement $70/sf');
+  assert.equal(s8.adjustments.basement, -11760, 'basement $35/sf for a 1962 home');
   const morton = data.sold_comps.find((c) => /3906 Morton/.test(c.address));
   assert.equal(morton.adjustments.garage, -10000, '$10k per garage stall');
   assert.ok(data.active_competition.length >= 1);

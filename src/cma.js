@@ -2,7 +2,8 @@
 // Rules (from the Listing Portal build brief):
 //  - typical Quad Cities $/sf 165–185; condition grades A–F
 //  - condition step by size tier: <1,000 $5k; 1,000–1,500 $10k; 1,500–2,500 $15k; 2,500–4,000 $20k; >4,000 $25k
-//  - half bath $5k; full bath $10k; garage $10k per car; finished basement ~$70/sf (65–75)
+//  - half bath $5k; full bath $10k; garage $10k per car
+//  - finished basement $70/sf; $35/sf for homes more than 30 years old (each home's basement valued at its own rate)
 //  - 2BR subjects compare to 1–2BR; 3BR+ subjects compare to 3–5BR; bedroom value absorbed by sq ft
 //  - age: <=5 yrs old -> comps <=10 yrs old; aim within 15 yrs; age matters little past 30; never new vs 30+
 //  - never cross state lines; expand radius before loosening other criteria
@@ -13,13 +14,16 @@ import { listingsInBox } from './db.js';
 export const RULES = {
   ppsfTypical: [165, 185],
   tiers: [[999, 5000], [1500, 10000], [2500, 15000], [4000, 20000], [Infinity, 25000]],
-  halfBath: 5000, fullBath: 10000, garageCar: 10000, basementPsf: 70,
+  halfBath: 5000, fullBath: 10000, garageCar: 10000, basementPsf: 70, basementPsfOld: 35, basementOldAge: 30,
   sold: [5, 8], active: [3, 4],
 };
 const GRADES = 'ABCDEF';
 const SOLD = ['Closed'];
 const ACTIVE = ['Active', 'Coming Soon'];
 const PENDING = ['Pending', 'Active Under Contract'];
+
+/** Finished-basement value per sq ft: $35 for homes more than 30 years old, otherwise $70 (unknown age: $70). */
+export const basementRate = (yearBuilt) => (yearBuilt && new Date().getFullYear() - yearBuilt > RULES.basementOldAge ? RULES.basementPsfOld : RULES.basementPsf);
 
 export const gradeStep = (sf) => RULES.tiers.find((t) => sf <= t[0])[1];
 const round = (n, to) => Math.round(n / to) * to;
@@ -58,7 +62,7 @@ export function adjust(subj, c, price, compGrade) {
   const full = (subj.full - (c.baths_full || 0)) * RULES.fullBath;
   const half = (subj.half - (c.baths_half || 0)) * RULES.halfBath;
   const garage = (subj.garage - Math.round(c.garage_spaces || 0)) * RULES.garageCar;
-  const bsmt = (subj.bsmt - (c.below_grade_finished_sqft || 0)) * RULES.basementPsf;
+  const bsmt = (subj.bsmt || 0) * basementRate(subj.year) - (c.below_grade_finished_sqft || 0) * basementRate(c.year_built);
   const total = cond + full + half + garage + bsmt;
   const indicated = sqft ? ((price + total) / sqft) * subj.sqft : null;
   const gross = Math.abs(cond) + Math.abs(full) + Math.abs(half) + Math.abs(garage) + Math.abs(bsmt) + (sqft ? Math.abs(subj.sqft - sqft) * 60 : 0);

@@ -60,7 +60,7 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 ## How the valuation works
 
 - **Indicated value:** `(price + adjustments) ÷ comp sq ft × subject sq ft`. Results are weighted toward closer, more similar, more recent sales.
-- **Adjustments:** condition grade step by size tier ($5k/$10k/$15k/$20k/$25k), $10k per full bath, $5k per half bath, $10k per garage stall, $70 per sf of finished basement.
+- **Adjustments:** condition grade step by size tier ($5k/$10k/$15k/$20k/$25k), $10k per full bath, $5k per half bath, $10k per garage stall, finished basement at $70 per sf ($35 per sf for homes more than 30 years old; each home's basement is valued at its own rate).
 - **Eligibility:** bedroom eligibility and age rules from the Listing Portal brief. Comps are always from the same state.
 - **Condition:** the MLS doesn't record condition, so comps start at the subject's grade. Pass `comp_grades` (for example `{"12345678": "B"}`) after reviewing photos.
 - **Square footage:** uses above-grade sq ft when the MLS reports it; otherwise total living area, and it says so in the concerns.
