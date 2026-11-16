@@ -188,7 +188,7 @@ async function callToolInner(env, name, a, fetchImpl) {
     return {
       version: VERSION,
       last_sync: s.last_run_at, last_sync_error: s.last_error, mode: s.mode, initial_import_completed: s.initial_completed_at,
-      data_current_through: s.high_water, last_run: { pages: s.last_run_pages, saved: s.last_run_upserts, removed: s.last_run_deletes },
+      data_current_through: s.high_water, fields_not_provided_by_mls: s.dropped_fields ? s.dropped_fields.split(',') : [], last_run: { pages: s.last_run_pages, saved: s.last_run_upserts, removed: s.last_run_deletes },
       records: await stats(db), recent_usage: await recentUsage(db, 10),
     };
   }

@@ -79,6 +79,11 @@ export function fakeMlsGrid(records, pageSize, opts) {
     if (opts.failAfter != null && calls.length >= opts.failAfter) { calls.push({ url }); return new Response('boom', { status: 500 }); }
     calls.push({ url, auth: init && init.headers && init.headers.Authorization });
     if (opts.rejectSelect && url.includes('$select=')) return new Response('bad select', { status: 400 });
+    if (opts.missingFields) {
+      const sel = (new URL(url).searchParams.get('$select') || '').split(',');
+      const bad = opts.missingFields.find((f) => sel.includes(f));
+      if (bad) return new Response(JSON.stringify({ error: { code: 400, message: 'Invalid select field', target: '$select', details: [{ code: 400, message: `The field '${bad}' does not exist or is unable to be retrieved. Please remove it from the request.` }] } }), { status: 400 });
+    }
     const u = new URL(url);
     const skip = Number(u.searchParams.get('$skip') || 0);
     const filter = decodeURIComponent(u.searchParams.get('$filter') || '');

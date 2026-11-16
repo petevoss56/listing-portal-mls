@@ -15,7 +15,7 @@ export function inServiceArea(rec, area) {
   return (QC_CITIES[st] || []).includes(String(rec.City || '').toLowerCase().trim());
 }
 
-export function buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter }) {
+export function buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter, dropped }) {
   const f = [`OriginatingSystemName eq '${cfg.source}'`];
   if (useTypeFilter !== false && cfg.propertyTypes.length) {
     f.push(cfg.propertyTypes.length === 1
@@ -25,9 +25,12 @@ export function buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter }) {
   if (mode !== 'incremental') f.push('MlgCanView eq true');
   if (checkpoint) f.push(`ModificationTimestamp gt ${checkpoint}`);
   const params = [`$filter=${encodeURIComponent(f.join(' and '))}`, `$top=${cfg.pageSize}`];
-  if (useSelect !== false) params.push(`$select=${SELECT_FIELDS.join(',')}`);
+  if (useSelect !== false) params.push(`$select=${SELECT_FIELDS.filter((x) => !(dropped && dropped.has(x))).join(',')}`);
   return `${cfg.base}/Property?${params.join('&')}`;
 }
+
+// Fields the sync cannot work without; if the MLS lacks one of these we stop and report instead of dropping it.
+const CORE_FIELDS = ['ListingKey', 'ModificationTimestamp', 'MlgCanView', 'StandardStatus', 'StateOrProvince'];
 
 const maxTs = (a, b) => (!a ? b || null : !b ? a : a > b ? a : b);
 
@@ -56,7 +59,9 @@ export async function runSync(env, opts) {
   let useSelect = st.use_select !== 0;
   let useTypeFilter = st.use_type_filter !== 0;
   let checkpoint = st.high_water || null; // greatest ModificationTimestamp received so far
-  const fresh = () => buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter });
+  // Fields this MLS doesn't provide; MLS Grid rejects a $select that names them, so we learn and skip them.
+  const dropped = new Set(String(st.dropped_fields || '').split(',').filter(Boolean));
+  const fresh = () => buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter, dropped });
   let url = fresh();
   let firstPage = true;
   let pages = 0, upserts = 0, deletes = 0, error = null, finished = false;
@@ -67,6 +72,17 @@ export async function runSync(env, opts) {
       res = await fetchImpl(url, { headers: { Authorization: `Bearer ${cfg.token}`, 'Accept-Encoding': 'gzip, deflate' } });
     } catch (e) { error = 'Network error: ' + e.message; break; }
     pages++;
+    if (res.status === 400 && firstPage && useSelect) {
+      const body = await res.clone().text().catch(() => '');
+      const m = body.match(/field '([A-Za-z0-9_]+)' does not exist/i) || body.match(/Invalid select field[^']*'([A-Za-z0-9_]+)'/i);
+      if (m && SELECT_FIELDS.includes(m[1]) && !CORE_FIELDS.includes(m[1]) && !dropped.has(m[1]) && dropped.size < 25) {
+        dropped.add(m[1]);
+        await saveSyncState(db, { dropped_fields: [...dropped].join(',') });
+        url = fresh();
+        await sleep(cfg.requestGapMs);
+        continue;
+      }
+    }
     if (res.status === 400 && firstPage && (useTypeFilter || useSelect)) {
       // Request shape not accepted. Falling back means downloading much more data, so it is off unless
       // ALLOW_LARGER_REQUESTS = "true" (keeps us far inside MLS Grid's hourly data caps by default).

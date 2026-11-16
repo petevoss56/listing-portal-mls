@@ -141,6 +141,28 @@ test('a second sync does not start while one is running', async () => {
   assert.equal((await getSyncState(env.DB)).lock_until, null, 'lock released');
 });
 
+test('fields the MLS does not provide are dropped from $select and remembered', async () => {
+  const env = makeEnv({ ALLOW_LARGER_REQUESTS: 'false' });
+  const recs = fixtureRecords();
+  const grid = fakeMlsGrid(recs, 50, { missingFields: ['UnparsedAddress', 'AboveGradeFinishedArea'] });
+  const r = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.finished, true);
+  assert.deepEqual((await getSyncState(env.DB)).dropped_fields.split(',').sort(), ['AboveGradeFinishedArea', 'UnparsedAddress']);
+  assert.ok(!grid.calls.at(-1).url.includes('UnparsedAddress'));
+  const row = await env.DB.prepare("SELECT address FROM listings WHERE mls_number = '12000002'").first();
+  assert.match(row.address, /3916 8th St/, 'address built from street parts');
+  const grid2 = fakeMlsGrid([], 50, { missingFields: ['UnparsedAddress', 'AboveGradeFinishedArea'] });
+  await runSync(env, { fetch: grid2.fetch, sleep: async () => {} });
+  assert.equal(grid2.calls.length, 1, 'remembered: no retries on the next run');
+});
+
+test('a missing core field stops the sync with a clear error', async () => {
+  const env = makeEnv({ ALLOW_LARGER_REQUESTS: 'false' });
+  const r = await runSync(env, { fetch: fakeMlsGrid(fixtureRecords(), 50, { missingFields: ['ListingKey'] }).fetch, sleep: async () => {} });
+  assert.equal(r.ok, false);
+});
+
 test('missing token is reported, not thrown', async () => {
   const env = makeEnv({ MLSGRID_TOKEN: '' });
   const r = await runSync(env, { fetch: async () => { throw new Error('should not call'); } });

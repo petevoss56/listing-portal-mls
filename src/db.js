@@ -23,7 +23,7 @@ const SCHEMA = [
 
 let schemaReady = false;
 // Columns added after the first deploy. Each runs once; "duplicate column" errors are expected afterwards.
-const MIGRATIONS = ['ALTER TABLE sync_state ADD COLUMN lock_until TEXT'];
+const MIGRATIONS = ['ALTER TABLE sync_state ADD COLUMN lock_until TEXT', 'ALTER TABLE sync_state ADD COLUMN dropped_fields TEXT'];
 
 export async function ensureSchema(db) {
   if (schemaReady) return;
