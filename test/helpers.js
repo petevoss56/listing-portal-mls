@@ -65,6 +65,8 @@ export function fixtureRecords() {
     rec(Object.assign({ StreetNumber: '100', StreetName: 'River', StreetSuffix: 'Dr', StandardStatus: 'Closed', ClosePrice: 140000, CloseDate: daysAgo(20), AboveGradeFinishedArea: 1100, StateOrProvince: 'IA', CountyOrParish: 'Scott', City: 'Bettendorf', PostalCode: '52722' }, at(0.004, -0.004))),
     // condo nearby — excluded from detached comps
     rec(Object.assign({ StreetNumber: '500', StreetName: '42nd', StreetSuffix: 'Ave', UnitNumber: '3', PropertySubType: 'Condominium', StandardStatus: 'Closed', ClosePrice: 99000, CloseDate: daysAgo(30), AboveGradeFinishedArea: 1050 }, at(0.002, 0.001))),
+    // 2-bedroom sale next door — excluded for a 3-bedroom subject when enough eligible comps exist
+    rec(Object.assign({ StreetNumber: '4244', StreetName: '9th', StreetSuffix: 'St', StandardStatus: 'Closed', ClosePrice: 78000, CloseDate: daysAgo(40), AboveGradeFinishedArea: 891, BedroomsTotal: 2 }, at(0.001, -0.001))),
     // nearby sale the MLS allows for IDX only (not Back Office) — must be ignored
     rec(Object.assign({ StreetNumber: '777', StreetName: '39th', StreetSuffix: 'Ave', StandardStatus: 'Closed', ClosePrice: 999000, CloseDate: daysAgo(15), AboveGradeFinishedArea: 1100, MlgCanUse: ['IDX'] }, at(0.0005, 0.0005))),
     // Chicago record — outside the service area, never stored

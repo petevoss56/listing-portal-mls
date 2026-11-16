@@ -232,6 +232,7 @@ test('run_cma on 709 40th Ave: Illinois-only comps, rules applied, range and con
   assert.ok(!data.sold_comps.some((c) => /500 42nd/.test(c.address)), 'condo excluded from detached search');
   assert.ok(!data.sold_comps.some((c) => /^709 40th/.test(c.address)), 'subject excluded from its own comps');
   assert.ok(!data.sold_comps.some((c) => /^777 39th/.test(c.address)), 'IDX-only record not used for Back Office comps');
+  assert.ok(!data.sold_comps.some((c) => c.flags.includes('Bedroom count outside range')), 'bedroom rule enforced');
   const s8 = data.sold_comps.find((c) => /3916 8th/.test(c.address));
   assert.equal(s8.adjustments.basement, -23520, 'basement $70/sf');
   const morton = data.sold_comps.find((c) => /3906 Morton/.test(c.address));
@@ -277,7 +278,7 @@ test('find tools, lookups and status', async () => {
   const addr = (await callTool(env, 'search_listings_by_address', { address: '709 40th Ave' })).data;
   assert.equal(addr.count, 1);
   const st = (await callTool(env, 'sync_status', {})).data;
-  assert.equal(st.records.total, 15);
+  assert.equal(st.records.total, 16);
   assert.ok(st.recent_usage.length >= 1);
 });
 

@@ -127,21 +127,28 @@ export async function runCma(db, subj, opts) {
   const baseMonths = opts.months || 6;
 
   // Sold comps: widen the radius first, then the time window.
-  let sold = [], soldRadius = null, soldMonths = baseMonths;
+  // Bedroom rule is a hard filter: 2BR subjects use 1–2BR comps, 3BR+ subjects use 3–5BR comps.
+  // Ineligible comps are used only if there are too few eligible ones even at the widest search.
+  const BED = 'Bedroom count outside range';
+  const eligibleOnly = (list) => list.filter((x) => !x.flags.includes(BED));
+  let sold = [], soldAll = [], soldRadius = null, soldMonths = baseMonths;
   for (const m of [baseMonths, Math.max(baseMonths, 12)]) {
     for (const r of radii) {
-      sold = (await candidates(db, subj, { statuses: SOLD, radius: r, months: m, kind, overrides, exclude })).filter((x) => !x.flags.includes('Crosses state line'));
+      soldAll = (await candidates(db, subj, { statuses: SOLD, radius: r, months: m, kind, overrides, exclude })).filter((x) => !x.flags.includes('Crosses state line'));
+      sold = eligibleOnly(soldAll);
       soldRadius = r; soldMonths = m;
       if (sold.length >= RULES.sold[0]) break;
     }
     if (sold.length >= RULES.sold[0]) break;
   }
+  let bedFallback = false;
+  if (sold.length < RULES.sold[0] && soldAll.length > sold.length) { sold = soldAll; bedFallback = true; }
   const forced = include.size ? (await candidates(db, subj, { statuses: SOLD, radius: maxR, months: 24, kind: 'any', overrides, exclude })).filter((x) => include.has(String(x.row.mls_number))) : [];
   const soldPick = dedupe([...forced, ...sold]).slice(0, Math.max(RULES.sold[1], forced.length));
 
   let actives = [], activeRadius = null;
   for (const r of radii) {
-    actives = await candidates(db, subj, { statuses: ACTIVE, radius: r, months: null, kind, overrides, exclude });
+    actives = eligibleOnly(await candidates(db, subj, { statuses: ACTIVE, radius: r, months: null, kind, overrides, exclude }));
     activeRadius = r;
     if (actives.length >= RULES.active[0]) break;
   }
@@ -170,6 +177,7 @@ export async function runCma(db, subj, opts) {
   // Confidence score and concerns.
   let conf = 95; const concerns = [];
   if (usable.length < RULES.sold[0]) { conf -= 6 * (RULES.sold[0] - usable.length); concerns.push(`Only ${usable.length} usable sold comps (target 5–8).`); }
+  if (bedFallback) { conf -= 8; concerns.push('Too few sales with an eligible bedroom count, so some comps outside the bedroom rule were used.'); }
   if (soldRadius > 1) { conf -= soldRadius > 2 ? 15 : 8; concerns.push(`Search radius expanded to ${soldRadius} mi to find enough sales.`); }
   if (soldMonths > baseMonths) { conf -= 8; concerns.push(`Had to look back ${soldMonths} months for sales.`); }
   const avgGross = usable.length ? usable.reduce((s, x) => s + x.a.grossPct, 0) / usable.length : 0;
