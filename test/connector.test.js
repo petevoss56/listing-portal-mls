@@ -111,6 +111,36 @@ test('by default a rejected request stops instead of falling back to larger down
   assert.match(r.error, /ALLOW_LARGER_REQUESTS/);
 });
 
+test('first import uses INITIAL_IMPORT_MAX_PAGES, later runs drop back to SYNC_MAX_PAGES', async () => {
+  const env = makeEnv({ INITIAL_IMPORT_MAX_PAGES: '3', SYNC_MAX_PAGES: '1' });
+  const recs = fixtureRecords();
+  const g1 = fakeMlsGrid(recs, 2);
+  const r1 = await runSync(env, { fetch: g1.fetch, sleep: async () => {} });
+  assert.equal(r1.pages, 3, 'initial import uses the faster setting');
+  let r;
+  do { r = await runSync(env, { fetch: fakeMlsGrid(recs, 2).fetch, sleep: async () => {} }); } while (!r.finished);
+  const later = [Object.assign({}, recs[3], { ModificationTimestamp: new Date(Date.now() + 9e5).toISOString() }), Object.assign({}, recs[4], { ModificationTimestamp: new Date(Date.now() + 9e5 + 1).toISOString() }), Object.assign({}, recs[5], { ModificationTimestamp: new Date(Date.now() + 9e5 + 2).toISOString() })];
+  const r2 = await runSync(env, { fetch: fakeMlsGrid(later, 1).fetch, sleep: async () => {} });
+  assert.equal(r2.mode, 'incremental');
+  assert.equal(r2.pages, 1, 'incremental runs use SYNC_MAX_PAGES');
+});
+
+test('a second sync does not start while one is running', async () => {
+  const env = makeEnv();
+  const recs = fixtureRecords();
+  let release;
+  const gate = new Promise((res) => (release = res));
+  const slowFetch = async (url, init) => { await gate; return fakeMlsGrid(recs, 50).fetch(url, init); };
+  const first = runSync(env, { fetch: slowFetch, sleep: async () => {} });
+  await new Promise((r) => setTimeout(r, 20));
+  const second = await runSync(env, { fetch: async () => { throw new Error('must not run'); }, sleep: async () => {} });
+  assert.equal(second.skipped, true);
+  release();
+  const done = await first;
+  assert.equal(done.ok, true);
+  assert.equal((await getSyncState(env.DB)).lock_until, null, 'lock released');
+});
+
 test('missing token is reported, not thrown', async () => {
   const env = makeEnv({ MLSGRID_TOKEN: '' });
   const r = await runSync(env, { fetch: async () => { throw new Error('should not call'); } });

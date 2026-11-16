@@ -37,7 +37,6 @@ export async function runSync(env, opts) {
   const db = env.DB;
   const fetchImpl = opts.fetch || fetch;
   const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const maxPages = opts.maxPages || cfg.maxPages;
   const started = Date.now();
   await ensureSchema(db);
   const now = new Date().toISOString();
@@ -47,7 +46,13 @@ export async function runSync(env, opts) {
   }
 
   const st = await getSyncState(db);
+  // Only one sync at a time (MLS Grid: replication requests must be sequential, never in parallel).
+  if (st.lock_until && st.lock_until > now && !opts.ignoreLock) return { ok: true, skipped: true, reason: 'Another sync is still running.' };
+  await saveSyncState(db, { lock_until: new Date(started + cfg.timeBudgetMs + 120000).toISOString() });
   const mode = st.mode === 'incremental' ? 'incremental' : 'initial';
+  // The first import can run faster (INITIAL_IMPORT_MAX_PAGES) during an MLS Grid grace period;
+  // once it finishes, every run drops back to SYNC_MAX_PAGES automatically.
+  const maxPages = opts.maxPages || (mode === 'initial' ? cfg.initialMaxPages : cfg.maxPages);
   let useSelect = st.use_select !== 0;
   let useTypeFilter = st.use_type_filter !== 0;
   let checkpoint = st.high_water || null; // greatest ModificationTimestamp received so far
@@ -103,6 +108,6 @@ export async function runSync(env, opts) {
     url = next;
     await sleep(cfg.requestGapMs);
   }
-  await saveSyncState(db, { last_run_at: now, last_run_pages: pages, last_run_upserts: upserts, last_run_deletes: deletes, last_error: error });
+  await saveSyncState(db, { last_run_at: now, last_run_pages: pages, last_run_upserts: upserts, last_run_deletes: deletes, last_error: error, lock_until: null });
   return { ok: !error, mode, pages, upserts, deletes, finished, error };
 }

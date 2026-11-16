@@ -54,6 +54,7 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 | `KEY_PREFIX` | `MRD` | MLS Grid prefix on MRED key fields, removed before display |
 | `MAX_RESULTS` | `25` | Most listings any one search returns |
 | `SYNC_PAGE_SIZE` / `SYNC_MAX_PAGES` | `5000` / `10` | Records per request / requests per 15-minute run (at most 40 requests an hour) |
+| `INITIAL_IMPORT_MAX_PAGES` | `10` | Requests per run during the first import only. Raise to `300` while MLS Grid has granted a grace period; afterwards runs drop back to `SYNC_MAX_PAGES` automatically. |
 | `ALLOW_LARGER_REQUESTS` | `false` | Whether to retry with bigger full-record downloads if MLS Grid rejects the slim request |
 
 ## How the valuation works
