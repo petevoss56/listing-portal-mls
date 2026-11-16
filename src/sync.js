@@ -124,7 +124,7 @@ export async function runSync(env, opts) {
     for (const r of json.value || []) {
       pageMax = maxTs(pageMax, r.ModificationTimestamp);
       if (r.MlgCanView === false) drop.push(String(r.ListingKey));
-      else if (inServiceArea(r, cfg.serviceArea) && (!cfg.propertyTypes.length || useTypeFilter || cfg.propertyTypes.includes(r.PropertyType))) keep.push(mapRecord(r, now, cfg.keyPrefix));
+      else if (inServiceArea(r, cfg.serviceArea) && (!cfg.propertyTypes.length || useTypeFilter || cfg.propertyTypes.includes(r.PropertyType))) keep.push(mapRecord(r, now, cfg.keyPrefix, { livingIsAboveGrade: cfg.livingIsAboveGrade }));
     }
     if (keep.length) await upsertRows(db, keep);
     if (drop.length) await deleteKeys(db, drop);

@@ -9,7 +9,8 @@ export function config(env) {
     base: env.MLSGRID_BASE || 'https://api.mlsgrid.com/v2',
     source: (env.ORIGINATING_SYSTEM || 'mred').toLowerCase(),
     token: env.MLSGRID_TOKEN || '',
-    keyPrefix: env.KEY_PREFIX ?? 'MRD', // MLS Grid key prefix for MRED; stripped before display
+    keyPrefix: env.KEY_PREFIX ?? 'MRD',
+    livingIsAboveGrade: String(env.ABOVE_GRADE_FROM_LIVING_AREA ?? 'true').toLowerCase() === 'true', // MLS Grid key prefix for MRED; stripped before display
     aiEnabled: String(env.AI_ACCESS_ENABLED ?? 'true').toLowerCase() !== 'false', // kill switch for the Claude connector (AI Use Addendum 3(c))
     maxResults: num(env.MAX_RESULTS, 25),
     serviceArea: parseServiceArea(env.SERVICE_AREA || 'IA:Scott;IL:Rock Island;IL:Henry'),

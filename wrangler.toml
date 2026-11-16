@@ -26,6 +26,8 @@ SERVICE_AREA = "IA:Scott;IL:Rock Island;IL:Henry"
 ADMIN_AGENTS = "pete"
 # Set to "false" to cut off Claude's access to MLS data immediately (the Listing Portal API keeps working).
 AI_ACCESS_ENABLED = "true"
+# MRED sends no AboveGradeFinishedArea; its LivingArea ("approx. sq ft") is used as above-grade square footage.
+ABOVE_GRADE_FROM_LIVING_AREA = "true"
 # MLS Grid key prefix for MRED, removed before display.
 KEY_PREFIX = "MRD"
 # Largest number of listings returned by one search.

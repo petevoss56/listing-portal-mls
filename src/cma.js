@@ -78,7 +78,7 @@ function describe(c, d, a, price) {
     price, close_date: c.close_date, list_price: c.list_price, original_list_price: c.original_list_price, dom: c.dom,
     distance_mi: Math.round(d * 100) / 100,
     sqft: a.sqft, sqft_source: a.sqftSource, beds: c.beds, baths_full: c.baths_full, baths_half: c.baths_half,
-    garage: c.garage_spaces, basement_finished_sqft: c.below_grade_finished_sqft, year_built: c.year_built,
+    garage: c.garage_spaces, basement_finished_sqft: c.below_grade_finished_sqft, basement_finish_estimated: !!c.bsmt_estimated, basement_description: c.basement, year_built: c.year_built,
     style: c.style, listing_office: c.list_office, price_per_sqft: a.ppsf ? Math.round(a.ppsf) : null,
     grade_used: a.grade,
     adjustments: { condition: a.cond, full_bath: a.full, half_bath: a.half, garage: a.garage, basement: Math.round(a.bsmt), total: Math.round(a.total) },
@@ -175,6 +175,8 @@ export async function runCma(db, subj, opts) {
   const avgGross = usable.length ? usable.reduce((s, x) => s + x.a.grossPct, 0) / usable.length : 0;
   if (avgGross > 0.1) { conf -= Math.min(20, Math.round(avgGross * 60)); concerns.push(`Comps need sizable adjustments (average ${Math.round(avgGross * 100)}% of price).`); }
   if (usable.some((x) => x.a.sqftSource !== 'above grade')) { conf -= 5; concerns.push('Some comps report only total living area, not above-grade sq ft. Verify in the MLS.'); }
+  const estB = usable.filter((x) => x.row.bsmt_estimated && x.row.basement_total_sqft > 0).length;
+  if (estB) concerns.push(`Finished basement size estimated for ${estB} comp${estB > 1 ? 's' : ''} from MRED's basement area and description (finished = all, partially finished = half). Check those listings if the basement adjustment matters.`);
   if (usable.length >= 3 && value) {
     const vals = usable.map((x) => x.a.indicated);
     const spread = (Math.max(...vals) - Math.min(...vals)) / value;

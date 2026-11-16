@@ -29,6 +29,9 @@ const MIGRATIONS = [
   'ALTER TABLE sync_state ADD COLUMN field_inventory TEXT',
   'ALTER TABLE sync_state ADD COLUMN geo_last_run TEXT',
   'ALTER TABLE listings ADD COLUMN geo_status TEXT',
+  'ALTER TABLE listings ADD COLUMN basement_total_sqft REAL',
+  'ALTER TABLE listings ADD COLUMN bsmt_estimated INTEGER',
+  'ALTER TABLE listings ADD COLUMN sqft_note TEXT',
 ];
 
 export async function ensureSchema(db) {
@@ -47,13 +50,13 @@ export const SELECT_FIELDS = [
   'ListPrice', 'OriginalListPrice', 'ClosePrice', 'CloseDate', 'ListingContractDate', 'OnMarketDate', 'DaysOnMarket',
   'CumulativeDaysOnMarket', 'BedroomsTotal', 'BathroomsFull', 'BathroomsHalf', 'LivingArea', 'AboveGradeFinishedArea',
   'BelowGradeFinishedArea', 'GarageSpaces', 'YearBuilt', 'LotSizeAcres', 'ArchitecturalStyle', 'Basement', 'PublicRemarks',
-  'ListOfficeName',
+  'ListOfficeName', 'MRD_BSMNT_SQFT',
 ];
 
 const COLS = ['listing_key', 'mls_number', 'status', 'property_type', 'property_subtype', 'address', 'street_number', 'street_name',
   'unit', 'city', 'state', 'zip', 'county', 'lat', 'lon', 'list_price', 'original_list_price', 'close_price', 'close_date',
   'list_date', 'dom', 'beds', 'baths_full', 'baths_half', 'living_area', 'above_grade_sqft', 'below_grade_finished_sqft',
-  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'modified', 'synced_at'];
+  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'basement_total_sqft', 'bsmt_estimated', 'sqft_note', 'modified', 'synced_at'];
 
 const pick = (r, ...keys) => {
   for (const k of keys) { const v = r[k]; if (v !== undefined && v !== null && v !== '') return v; }
@@ -66,7 +69,25 @@ const date = (v) => (v ? String(v).slice(0, 10) : null);
 // MLS Grid puts an MLS prefix on key fields (e.g. MRD...). It must be removed before display.
 export const stripPrefix = (v, prefix) => (v == null ? null : prefix && String(v).toUpperCase().startsWith(prefix.toUpperCase()) ? String(v).slice(prefix.length) : String(v));
 
-export function mapRecord(r, syncedAt, prefix) {
+// Finished basement area. Use the standard field when the MLS fills it; otherwise estimate it from MRED's basement
+// size (MRD_BSMNT_SQFT) and the Basement description: finished = all of it, partially finished = half, else none.
+export function finishedBasement(r) {
+  const reported = n(r.BelowGradeFinishedArea);
+  if (reported != null) return { sqft: reported, estimated: 0 };
+  const total = n(r.MRD_BSMNT_SQFT);
+  const desc = (Array.isArray(r.Basement) ? r.Basement.join(' ') : String(r.Basement || '')).toLowerCase();
+  if (!total || !desc || /\b(none|crawl|slab)\b/.test(desc) && !/finished/.test(desc)) return { sqft: total ? 0 : null, estimated: total ? 1 : 0 };
+  if (/partial(ly)?[ -]?finished|part finished/.test(desc)) return { sqft: Math.round(total / 2), estimated: 1 };
+  if (/unfinished/.test(desc) && !/(^|[^n])finished/.test(desc.replace(/unfinished/g, ''))) return { sqft: 0, estimated: 1 };
+  if (/finished/.test(desc)) return { sqft: total, estimated: 1 };
+  return { sqft: 0, estimated: 1 };
+}
+
+export function mapRecord(r, syncedAt, prefix, opts) {
+  opts = opts || {};
+  const bsmt = finishedBasement(r);
+  const above = n(r.AboveGradeFinishedArea);
+  const living = n(r.LivingArea);
   const street = [r.StreetDirPrefix, r.StreetName, r.StreetSuffix, r.StreetDirSuffix].filter(Boolean).join(' ') || null;
   const addr = r.UnparsedAddress || [r.StreetNumber, street].filter(Boolean).join(' ') || null;
   return {
@@ -95,13 +116,18 @@ export function mapRecord(r, syncedAt, prefix) {
     baths_full: n(r.BathroomsFull),
     baths_half: n(r.BathroomsHalf),
     living_area: n(r.LivingArea),
-    above_grade_sqft: n(r.AboveGradeFinishedArea),
-    below_grade_finished_sqft: n(r.BelowGradeFinishedArea),
+    // MRED's LivingArea is its "approx. sq ft" above grade (basement is reported separately), so it stands in for
+    // AboveGradeFinishedArea when ABOVE_GRADE_FROM_LIVING_AREA is on.
+    above_grade_sqft: above != null ? above : opts.livingIsAboveGrade ? living : null,
+    below_grade_finished_sqft: bsmt.sqft,
     garage_spaces: n(r.GarageSpaces),
     year_built: n(r.YearBuilt),
     lot_acres: n(r.LotSizeAcres),
     style: list(r.ArchitecturalStyle),
     basement: list(r.Basement),
+    basement_total_sqft: n(r.MRD_BSMNT_SQFT),
+    bsmt_estimated: bsmt.estimated,
+    sqft_note: above != null ? null : opts.livingIsAboveGrade && living != null ? 'living area used as above grade' : null,
     remarks: r.PublicRemarks ? String(r.PublicRemarks).slice(0, 1500) : null,
     can_use: r.MlgCanUse == null ? null : list(r.MlgCanUse),
     list_office: pick(r, 'ListOfficeName'),
