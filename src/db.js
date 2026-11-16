@@ -23,7 +23,13 @@ const SCHEMA = [
 
 let schemaReady = false;
 // Columns added after the first deploy. Each runs once; "duplicate column" errors are expected afterwards.
-const MIGRATIONS = ['ALTER TABLE sync_state ADD COLUMN lock_until TEXT', 'ALTER TABLE sync_state ADD COLUMN dropped_fields TEXT'];
+const MIGRATIONS = [
+  'ALTER TABLE sync_state ADD COLUMN lock_until TEXT',
+  'ALTER TABLE sync_state ADD COLUMN dropped_fields TEXT',
+  'ALTER TABLE sync_state ADD COLUMN field_inventory TEXT',
+  'ALTER TABLE sync_state ADD COLUMN geo_last_run TEXT',
+  'ALTER TABLE listings ADD COLUMN geo_status TEXT',
+];
 
 export async function ensureSchema(db) {
   if (schemaReady) return;
@@ -105,7 +111,8 @@ export function mapRecord(r, syncedAt, prefix) {
 }
 
 const UPSERT_SQL = `INSERT INTO listings (${COLS.join(', ')}) VALUES (${COLS.map(() => '?').join(', ')})
-  ON CONFLICT(listing_key) DO UPDATE SET ${COLS.slice(1).map((c) => `${c} = excluded.${c}`).join(', ')}`;
+  ON CONFLICT(listing_key) DO UPDATE SET ${COLS.slice(1).map((c) => (c === 'lat' || c === 'lon' ? `${c} = COALESCE(excluded.${c}, listings.${c})` : `${c} = excluded.${c}`)).join(', ')}`;
+// (Coordinates are kept when an update arrives without them, so geocoded positions survive MLS updates.)
 
 export async function upsertRows(db, rows) {
   for (let i = 0; i < rows.length; i += 50) {

@@ -64,6 +64,23 @@ export async function runSync(env, opts) {
   const fresh = () => buildUrl(cfg, { mode, checkpoint, useSelect, useTypeFilter, dropped });
   let url = fresh();
   let firstPage = true;
+
+  // One-time field inventory: which fields this MLS actually sends (names and how many of 5 samples have a value).
+  // Field names only are kept — never values. Runs inside the lock, in sequence with the replication requests.
+  if (!st.field_inventory && !opts.skipInventory && String(env.FIELD_INVENTORY ?? 'true') !== 'false') {
+    try {
+      const f = [`OriginatingSystemName eq '${cfg.source}'`, 'MlgCanView eq true'];
+      if (useTypeFilter && cfg.propertyTypes.length === 1) f.splice(1, 0, `PropertyType eq '${cfg.propertyTypes[0]}'`);
+      const r = await fetchImpl(`${cfg.base}/Property?$filter=${encodeURIComponent(f.join(' and '))}&$top=5`, { headers: { Authorization: `Bearer ${cfg.token}`, 'Accept-Encoding': 'gzip, deflate' } });
+      if (r.ok) {
+        const j = await r.json();
+        const counts = {};
+        for (const rec of j.value || []) for (const [k, v] of Object.entries(rec)) counts[k] = (counts[k] || 0) + (v !== null && v !== '' && !(Array.isArray(v) && !v.length) ? 1 : 0);
+        await saveSyncState(db, { field_inventory: JSON.stringify({ at: now, samples: (j.value || []).length, fields: counts }) });
+      }
+      await sleep(cfg.requestGapMs);
+    } catch (e) { /* inventory is best-effort */ }
+  }
   let pages = 0, upserts = 0, deletes = 0, error = null, finished = false;
 
   while (pages < maxPages && Date.now() - started < cfg.timeBudgetMs) {

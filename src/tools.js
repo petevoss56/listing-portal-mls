@@ -144,6 +144,27 @@ const brief = (x) => ({
   listing_office: x.list_office,
 });
 
+const INTEREST = /lat|lon|coord|geo|sq|area|footage|garage|park|bath|bed|basement|year|style|story|stories|condition|lot/i;
+function inventorySummary(raw) {
+  if (!raw) return null;
+  try {
+    const inv = JSON.parse(raw);
+    const names = Object.keys(inv.fields);
+    return {
+      checked_at: inv.at, sample_records: inv.samples, total_fields: names.length,
+      relevant_fields: names.filter((n) => INTEREST.test(n)).sort().map((n) => `${n} (${inv.fields[n]}/${inv.samples} filled)`),
+    };
+  } catch (e) { return null; }
+}
+async function coordStats(db, s) {
+  const r = await db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN lat IS NOT NULL THEN 1 ELSE 0 END) AS with_coords,
+    SUM(CASE WHEN geo_status = 'no_match' OR geo_status = 'tie' THEN 1 ELSE 0 END) AS not_found
+    FROM listings WHERE status IN ('Active','Coming Soon','Pending','Active Under Contract') OR (status = 'Closed' AND close_date >= ?)`)
+    .bind(new Date(Date.now() - 24 * 30.44 * 864e5).toISOString().slice(0, 10)).first();
+  let last = null; try { last = s.geo_last_run ? JSON.parse(s.geo_last_run) : null; } catch (e) { /* ignore */ }
+  return { comp_ready_listings: r.total || 0, with_coordinates: r.with_coords || 0, address_not_found: r.not_found || 0, last_geocode_run: last };
+}
+
 export async function callTool(env, name, a, fetchImpl) {
   const out = await callToolInner(env, name, a || {}, fetchImpl);
   return out && typeof out === 'object' && !out.error ? Object.assign({ source: ATTRIBUTION }, out) : out;
@@ -189,7 +210,8 @@ async function callToolInner(env, name, a, fetchImpl) {
       version: VERSION,
       last_sync: s.last_run_at, last_sync_error: s.last_error, mode: s.mode, initial_import_completed: s.initial_completed_at,
       data_current_through: s.high_water, fields_not_provided_by_mls: s.dropped_fields ? s.dropped_fields.split(',') : [], last_run: { pages: s.last_run_pages, saved: s.last_run_upserts, removed: s.last_run_deletes },
-      records: await stats(db), recent_usage: await recentUsage(db, 10),
+      records: await stats(db), map_coordinates: await coordStats(db, s), mls_fields: inventorySummary(s.field_inventory),
+      recent_usage: await recentUsage(db, 10),
     };
   }
   return { error: `Unknown tool: ${name}` };

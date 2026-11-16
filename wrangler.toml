@@ -6,9 +6,9 @@ compatibility_date = "2025-09-01"
 [limits]
 cpu_ms = 300000
 
-# Pull MLS changes every 15 minutes.
+# Pull MLS changes every 15 minutes; fill in missing map coordinates 5 minutes after each.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "5,20,35,50 * * * *"]
 
 [observability]
 enabled = true

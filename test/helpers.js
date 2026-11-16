@@ -24,6 +24,7 @@ export function makeEnv(extra) {
     CONNECTOR_KEYS: 'pete:pete-key-0123456789abcdef,chris:chris-key-0123456789abcd',
     SYNC_REQUEST_GAP_MS: '0',
     ALLOW_LARGER_REQUESTS: 'true',
+    FIELD_INVENTORY: 'false',
   }, extra || {});
 }
 

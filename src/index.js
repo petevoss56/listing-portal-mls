@@ -7,6 +7,10 @@
 import { config, VERSION } from './config.js';
 import { handleMcp } from './mcp.js';
 import { runSync } from './sync.js';
+import { runGeocode } from './geocode.js';
+import { saveSyncState } from './db.js';
+
+export const GEOCODE_CRON = '5,20,35,50 * * * *';
 import { callTool, TOOLS } from './tools.js';
 import { ensureSchema, logUsage } from './db.js';
 
@@ -56,6 +60,14 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runSync(env));
+    if (event.cron === GEOCODE_CRON) {
+      ctx.waitUntil((async () => {
+        await ensureSchema(env.DB);
+        const r = await runGeocode(env);
+        await saveSyncState(env.DB, { geo_last_run: JSON.stringify(Object.assign({ at: new Date().toISOString() }, r)) });
+      })());
+    } else {
+      ctx.waitUntil(runSync(env));
+    }
   },
 };
