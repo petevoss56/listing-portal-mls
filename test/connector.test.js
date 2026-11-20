@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeEnv, fixtureRecords, fakeMlsGrid, rec } from './helpers.js';
+import { makeEnv, fixtureRecords, fakeMlsGrid, rec, rosterFixtures } from './helpers.js';
 import { runSync, buildUrl } from '../src/sync.js';
 import { config } from '../src/config.js';
 import worker from '../src/index.js';
@@ -154,7 +154,7 @@ test('fields the MLS does not provide are dropped from $select and remembered', 
   assert.match(row.address, /3916 8th St/, 'address built from street parts');
   const grid2 = fakeMlsGrid([], 50, { missingFields: ['UnparsedAddress', 'AboveGradeFinishedArea'] });
   await runSync(env, { fetch: grid2.fetch, sleep: async () => {} });
-  assert.equal(grid2.calls.length, 1, 'remembered: no retries on the next run');
+  assert.equal(grid2.calls.filter((c) => c.url.includes('/Property?')).length, 1, 'remembered: no retries on the next run');
 });
 
 test('a missing core field stops the sync with a clear error', async () => {
@@ -218,7 +218,7 @@ test('MCP: initialize, tools/list and notifications behave per protocol', async 
   assert.equal(note.status, 202);
   const list = await (await mcp(env, { jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   const names = list.result.tools.map((t) => t.name);
-  assert.deepEqual(names, ['run_cma', 'find_sold_comps', 'find_active_listings', 'get_listing', 'search_listings_by_address', 'sync_status']);
+  assert.deepEqual(names, ['run_cma', 'find_sold_comps', 'find_active_listings', 'get_listing', 'search_listings_by_address', 'find_agent', 'sync_status']);
   const unknown = await (await mcp(env, { jsonrpc: '2.0', id: 3, method: 'nope' })).json();
   assert.equal(unknown.error.code, -32601);
   const get = await worker.fetch(new Request('https://x.test/mcp', { headers: { Authorization: 'Bearer pete-key-0123456789abcdef' } }), env);
@@ -318,4 +318,107 @@ test('portal API and admin sync permissions', async () => {
   assert.ok((await api.json()).valuation);
   const denied = await worker.fetch(new Request('https://x.test/admin/sync', { method: 'POST', headers: { Authorization: 'Bearer chris-key-0123456789abcd' } }), env);
   assert.equal(denied.status, 403);
+});
+
+// ---- Agents, offices and agent IDs on listings ----
+
+async function syncedWithAgents() {
+  const env = makeEnv();
+  const recs = fixtureRecords();
+  // 3916 8th St: listed by Jane, sold to Bob's buyer. 740 41st Ave: Jane's active listing.
+  Object.assign(recs[1], { ListAgentKey: 'MRDA1', ListAgentMlsId: 'MRD111', ListAgentFullName: 'Jane Lister', ListOfficeKey: 'MRDO1', BuyerAgentKey: 'MRDA2', BuyerAgentMlsId: 'MRD222', BuyerAgentFullName: 'Bob Buyer', BuyerOfficeKey: 'MRDO2', BuyerOfficeName: 'Other Realty', ListingContractDate: new Date(Date.now() - 80 * 864e5).toISOString().slice(0, 10) });
+  Object.assign(recs[8], { ListAgentKey: 'MRDA1', ListAgentMlsId: 'MRD111', ListAgentFullName: 'Jane Lister', ListOfficeKey: 'MRDO1', ListingContractDate: new Date(Date.now() - 35 * 864e5).toISOString().slice(0, 10) });
+  const ros = rosterFixtures();
+  const grid = fakeMlsGrid(recs, 50, ros);
+  const r = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  return { env, recs, ros, grid, r };
+}
+
+test('sync pulls agent and office rosters and stores agent IDs on listings', async () => {
+  const { env, r, grid } = await syncedWithAgents();
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.members.saved, 2);
+  assert.equal(r.offices.saved, 1);
+  assert.ok(grid.calls.some((c) => c.url.includes('/Member?') && decodeURIComponent(c.url).includes('MlgCanView eq true')));
+  assert.ok(decodeURIComponent(grid.calls[0].url).includes('ListAgentKey'), 'agent fields requested on listings');
+  const row = await env.DB.prepare("SELECT list_agent_key, list_agent_mls_id, buyer_agent_key, buyer_office_name FROM listings WHERE mls_number = '12000002'").first();
+  assert.deepEqual({ ...row }, { list_agent_key: 'MRDA1', list_agent_mls_id: '111', buyer_agent_key: 'MRDA2', buyer_office_name: 'Other Realty' });
+  const jane = await env.DB.prepare("SELECT mls_id, email, office_mls_id FROM agents WHERE member_key = 'MRDA1'").first();
+  assert.deepEqual({ ...jane }, { mls_id: '111', email: 'jane@example.com', office_mls_id: '900' });
+  assert.equal((await getSyncState(env.DB)).member_mode, 'incremental');
+  assert.equal(r.backfill.needed, false, 'a fresh import needs no backfill');
+});
+
+test('roster updates are incremental and hidden agents are removed', async () => {
+  const { env, ros } = await syncedWithAgents();
+  const later = new Date(Date.now() + 60000).toISOString();
+  const members = [Object.assign({}, ros.members[0], { MemberEmail: 'jane@new.example.com', ModificationTimestamp: later }), Object.assign({}, ros.members[1], { MlgCanView: false, ModificationTimestamp: later })];
+  const grid = fakeMlsGrid([], 50, { members, offices: [] });
+  const r = await runSync(env, { fetch: grid.fetch, sleep: async () => {} });
+  const memberUrl = decodeURIComponent(grid.calls.find((c) => c.url.includes('/Member?')).url);
+  assert.ok(memberUrl.includes('ModificationTimestamp gt') && !memberUrl.includes('MlgCanView eq true'));
+  assert.equal(r.members.saved, 1);
+  assert.equal(r.members.removed, 1);
+  assert.equal((await env.DB.prepare("SELECT email FROM agents WHERE member_key = 'MRDA1'").first()).email, 'jane@new.example.com');
+  assert.equal(await env.DB.prepare("SELECT * FROM agents WHERE member_key = 'MRDA2'").first(), null);
+});
+
+test('a roster the subscription lacks is reported but never blocks listings', async () => {
+  const env = makeEnv();
+  const r = await runSync(env, { fetch: fakeMlsGrid(fixtureRecords(), 50, { rosterStatus: 403 }).fetch, sleep: async () => {} });
+  assert.equal(r.ok, true);
+  assert.match(r.members.error, /403/);
+  const st = (await callTool(env, 'sync_status', {})).data;
+  assert.match(st.agent_roster.members_error, /403/);
+  assert.equal(st.records.total, 16);
+});
+
+test('existing databases get agent IDs through a paced one-time backfill', async () => {
+  // 5 requests per run: 1 listings + 1 agents + 1 offices leaves 2 for the backfill.
+  const env = makeEnv({ SYNC_MAX_PAGES: '5' });
+  const recs = fixtureRecords();
+  await runSync(env, { fetch: fakeMlsGrid(recs, 50).fetch, sleep: async () => {} });
+  // Simulate a database imported before agent fields existed.
+  await env.DB.prepare('UPDATE sync_state SET listing_fields_version = NULL').run();
+  await env.DB.prepare('UPDATE listings SET list_agent_key = NULL').run();
+  recs.forEach((x) => Object.assign(x, { ListAgentKey: 'MRDA1' }));
+  const r1 = await runSync(env, { fetch: fakeMlsGrid(recs, 5).fetch, sleep: async () => {} });
+  assert.equal(r1.backfill.needed, true);
+  assert.equal(r1.backfill.done, false, 'stays within the per-run request budget');
+  assert.equal(r1.pages, 5);
+  assert.equal(r1.backfill.pages, 2);
+  let r, runs = 0;
+  do { r = await runSync(env, { fetch: fakeMlsGrid(recs, 5).fetch, sleep: async () => {} }); runs++; } while (!r.backfill.done && runs < 10);
+  assert.equal(r.backfill.done, true);
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM listings WHERE list_agent_key IS NULL').first()).n, 0);
+  const st = await getSyncState(env.DB);
+  assert.equal(st.listing_fields_version, 2);
+  assert.equal(st.backfill_high_water, null);
+  const again = await runSync(env, { fetch: fakeMlsGrid(recs, 5).fetch, sleep: async () => {} });
+  assert.equal(again.backfill.needed, false);
+});
+
+test('find_agent returns contact info and local activity; get_listing names the agents', async () => {
+  const { env } = await syncedWithAgents();
+  const byName = (await callTool(env, 'find_agent', { name: 'jane' })).data;
+  assert.equal(byName.count, 1);
+  const jane = byName.results[0];
+  assert.equal(jane.email, 'jane@example.com');
+  assert.equal(jane.phones.mobile, '563-555-0101');
+  assert.equal(jane.office.name, 'Example Realty 1');
+  assert.equal(jane.office.phone, '563-555-0000');
+  assert.deepEqual(jane.last_12_months, { listings_taken: 2, closed_list_side: 1, closed_buyer_side: 0, current_listings: 1 });
+  const byId = (await callTool(env, 'find_agent', { mls_id: 'MRD222' })).data;
+  assert.equal(byId.results[0].name, 'Bob Buyer');
+  assert.equal(byId.results[0].last_12_months.closed_buyer_side, 1);
+  const byOffice = (await callTool(env, 'find_agent', { office: 'Other' })).data;
+  assert.equal(byOffice.count, 1);
+  assert.equal((await callTool(env, 'find_agent', {})).isError, true);
+  const one = (await callTool(env, 'get_listing', { mls_number: '12000002' })).data;
+  assert.equal(one.listing_agent.name, 'Jane Lister');
+  assert.equal(one.listing_agent.email, 'jane@example.com');
+  assert.equal(one.buyer_agent.name, 'Bob Buyer');
+  assert.equal(one.buyer_agent.office, 'Other Realty');
+  const log = await env.DB.prepare("SELECT summary FROM usage_log WHERE tool = 'find_agent'").all();
+  assert.equal(log.results[0].summary, 'jane');
 });
