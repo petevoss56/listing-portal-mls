@@ -2,7 +2,7 @@
 //   MLSGRID_TOKEN   (secret)  MLS Grid access token for the Broker Back Office subscription
 //   CONNECTOR_KEYS  (secret)  comma-separated "name:key" pairs, one per person, e.g. "pete:abc123,chris:def456"
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export function config(env) {
   return {

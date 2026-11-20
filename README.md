@@ -7,6 +7,7 @@ Keeps a private copy of MRED listings for the Quad Cities (from MLS Grid) and le
 - **Only records the MLS allows for Back Office use** are used for comps (`MlgCanUse` contains `BO`)
 - **Never mixes Iowa and Illinois comps**
 - **One key per person**, and every tool call is logged with who ran it
+- **Agent and office rosters** (MLS Grid `Member` and `Office` resources) are synced too, and every listing stores its listing, co-listing, buyer and co-buyer agent IDs and offices. This is the base for agent contact lookups and the Agent Sales Tracker.
 
 ## Tools Claude gets
 
@@ -15,8 +16,9 @@ Keeps a private copy of MRED listings for the Quad Cities (from MLS Grid) and le
 | `run_cma` | Full Step 1 CMA: 5–8 sold comps and 3–4 actives (radius widens first, then the time window), adjustments, value, $10k range, recommended price, confidence score with concerns, top 3 competitors |
 | `find_sold_comps` | Closed sales near an address, best matches first |
 | `find_active_listings` | Active / coming soon / pending listings near an address |
-| `get_listing` | One listing by MLS number, including remarks |
+| `get_listing` | One listing by MLS number, including remarks and the listing/buyer agents with contact info |
 | `search_listings_by_address` | Past and current MLS records for an address |
+| `find_agent` | Agent contact info (email, phones, office) by name, MLS ID or office, plus their last-12-month activity in the service area. In-house use only. |
 | `sync_status` | How current the data is, record counts, recent usage |
 
 The Listing Portal can call the same tools at `POST /api/tools/<tool name>` with the same key.
@@ -56,6 +58,13 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 | `SYNC_PAGE_SIZE` / `SYNC_MAX_PAGES` | `5000` / `10` | Records per request / requests per 15-minute run (at most 40 requests an hour) |
 | `INITIAL_IMPORT_MAX_PAGES` | `10` | Requests per run during the first import only. Raise to `300` while MLS Grid has granted a grace period; afterwards runs drop back to `SYNC_MAX_PAGES` automatically. |
 | `ALLOW_LARGER_REQUESTS` | `false` | Whether to retry with bigger full-record downloads if MLS Grid rejects the slim request |
+
+## Agent data
+
+- Each sync run first brings listings up to date, then pulls agent (`Member`) and office (`Office`) changes, using the same checkpoint-and-resume rules as listings. All MRED agents and offices are kept (a few tens of thousands of small rows), since agents from anywhere in MRED can list or sell in the service area.
+- If the MLS Grid subscription doesn't include those resources, listings keep syncing normally and `sync_status` shows the error under `agent_roster`.
+- **One-time backfill.** Listings stored before agent IDs were added are re-downloaded once, on their own checkpoint, using whatever request budget is left each run (about 7 of the 10 requests per run). It runs alongside the normal sync and finishes on its own; `sync_status` shows `listing_agent_ids: complete` when done. To speed it up, an admin can `POST /admin/sync?pages=50`.
+- Activity counts in `find_agent` cover only the stored service-area listings.
 
 ## How the valuation works
 

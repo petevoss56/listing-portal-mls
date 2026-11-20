@@ -1,7 +1,7 @@
 // The tools Claude (and the Listing Portal) can call.
 import { runCma, candidates, compSqft } from './cma.js';
 import { geocode } from './geo.js';
-import { listingByMls, searchByAddress, stats, getSyncState, recentUsage, stripPrefix } from './db.js';
+import { listingByMls, searchByAddress, stats, getSyncState, recentUsage, stripPrefix, agentByKey, searchAgents, agentActivity } from './db.js';
 import { VERSION, config } from './config.js';
 
 // Every response carries attribution (AI Use Addendum 3(d)) and the permitted-use reminder.
@@ -81,6 +81,20 @@ export const TOOLS = [
     title: 'Search listings by address',
     description: 'Finds MLS records (any status, including past sales) whose address matches, e.g. "709 40th Ave".',
     inputSchema: { type: 'object', properties: { address: { type: 'string' }, limit: { type: 'integer' } }, required: ['address'] },
+  },
+  {
+    name: 'find_agent',
+    title: 'Look up an agent',
+    description: 'Finds MLS agents by name, MLS ID or office and returns their contact info (email, phones), office, and their activity in the Quad Cities listings over the last 12 months (listings taken, closed sales on each side, current listings). For in-house use only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Full or partial name, e.g. "Jane Smith" or "Smith"' },
+        mls_id: { type: 'string', description: "Agent's MLS ID" },
+        office: { type: 'string', description: 'Full or partial office name' },
+        limit: { type: 'integer', description: 'Default 10' },
+      },
+    },
   },
   {
     name: 'sync_status',
@@ -198,7 +212,47 @@ async function callToolInner(env, name, a, fetchImpl) {
   }
   if (name === 'get_listing') {
     const r = await listingByMls(db, stripPrefix(a.mls_number, cfg.keyPrefix));
-    return r ? Object.assign(brief(r), { remarks: r.remarks, county: r.county, modified: r.modified }) : { error: `No listing with MLS #${a.mls_number} in the Quad Cities copy.` };
+    if (!r) return { error: `No listing with MLS #${a.mls_number} in the Quad Cities copy.` };
+    const agent = async (key, mlsId, nameOnListing, officeName) => {
+      if (!key && !nameOnListing) return undefined;
+      const m = await agentByKey(db, key);
+      return {
+        name: (m && m.full_name) || nameOnListing, mls_id: (m && m.mls_id) || mlsId,
+        email: m ? m.email : null, phone: m ? m.mobile_phone || m.direct_phone || m.preferred_phone || m.office_phone : null,
+        office: (m && m.office_name) || officeName || null, office_phone: m ? m.office_main_phone : null,
+      };
+    };
+    return Object.assign(brief(r), {
+      listing_agent: await agent(r.list_agent_key, r.list_agent_mls_id, r.list_agent_name, r.list_office),
+      co_listing_agent: await agent(r.co_list_agent_key, r.co_list_agent_mls_id, r.co_list_agent_name),
+      buyer_agent: await agent(r.buyer_agent_key, r.buyer_agent_mls_id, r.buyer_agent_name, r.buyer_office_name),
+      co_buyer_agent: await agent(r.co_buyer_agent_key, r.co_buyer_agent_mls_id, r.co_buyer_agent_name),
+      remarks: r.remarks, county: r.county, modified: r.modified,
+    });
+  }
+  if (name === 'find_agent') {
+    if (!a.name && !a.mls_id && !a.office) return { error: 'Give a name, MLS ID or office to search for.' };
+    const rows = await searchAgents(db, { mlsId: a.mls_id ? stripPrefix(a.mls_id, cfg.keyPrefix) : null, name: a.name, office: a.office, limit: Math.min(a.limit || 10, cfg.maxResults) });
+    if (!rows.length) {
+      const n = (await db.prepare('SELECT COUNT(*) AS n FROM agents').first()).n;
+      return { count: 0, results: [], note: n ? 'No matching agent.' : 'The agent roster has not been downloaded yet; check sync_status.' };
+    }
+    const since = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+    const results = [];
+    for (const r of rows) {
+      const act = (await agentActivity(db, r.member_key, since)) || {};
+      results.push({
+        name: r.full_name, mls_id: r.mls_id, email: r.email,
+        phones: { mobile: r.mobile_phone, direct: r.direct_phone, preferred: r.preferred_phone, office: r.office_phone },
+        license: r.license, status: r.status, type: r.member_type,
+        office: {
+          name: r.office_full_name || r.office_name, mls_id: r.office_mls_id, phone: r.office_main_phone,
+          address: [r.office_address, r.office_city, r.office_state, r.office_zip].filter(Boolean).join(', ') || null,
+        },
+        last_12_months: { listings_taken: act.listings_taken || 0, closed_list_side: act.closed_list_side || 0, closed_buyer_side: act.closed_buyer_side || 0, current_listings: act.current_listings || 0 },
+      });
+    }
+    return { count: results.length, results, activity_note: 'Activity counts cover the stored service-area listings only (Scott County IA, Rock Island and Henry Counties IL).' };
   }
   if (name === 'search_listings_by_address') {
     const rows = await searchByAddress(db, a.address, Math.min(a.limit || 10, cfg.maxResults));
@@ -210,7 +264,13 @@ async function callToolInner(env, name, a, fetchImpl) {
       version: VERSION,
       last_sync: s.last_run_at, last_sync_error: s.last_error, mode: s.mode, initial_import_completed: s.initial_completed_at,
       data_current_through: s.high_water, fields_not_provided_by_mls: s.dropped_fields ? s.dropped_fields.split(',') : [], last_run: { pages: s.last_run_pages, saved: s.last_run_upserts, removed: s.last_run_deletes },
-      records: await stats(db), map_coordinates: await coordStats(db, s), mls_fields: inventorySummary(s.field_inventory),
+      records: await stats(db),
+      agent_roster: {
+        members_error: s.member_error || null, offices_error: s.office_error || null,
+        members_initial_import_done: s.member_mode === 'incremental', offices_initial_import_done: s.office_mode === 'incremental',
+        listing_agent_ids: (s.listing_fields_version || 1) >= 2 ? 'complete' : s.mode === 'incremental' ? `backfilling (through ${s.backfill_high_water || 'start'})` : 'after first import',
+      },
+      map_coordinates: await coordStats(db, s), mls_fields: inventorySummary(s.field_inventory),
       recent_usage: await recentUsage(db, 10),
     };
   }

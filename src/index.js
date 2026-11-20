@@ -48,7 +48,7 @@ export default {
       if (!TOOLS.some((t) => t.name === name)) return json({ error: 'Unknown tool' }, 404);
       const args = await request.json().catch(() => ({}));
       const result = await callTool(env, name, args);
-      await logUsage(env.DB, agent, name, args.address || args.mls_number || '');
+      await logUsage(env.DB, agent, name, args.address || args.mls_number || args.name || args.mls_id || args.office || '');
       return json(result, result && result.error ? 400 : 200);
     }
 

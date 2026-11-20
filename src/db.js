@@ -19,7 +19,26 @@ const SCHEMA = [
   'INSERT OR IGNORE INTO sync_state (id, mode, use_select) VALUES (1, \'initial\', 1)',
   `CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, agent TEXT, tool TEXT, summary TEXT)`,
+  // Agents and offices (MLS Grid Member and Office resources), for in-house contact lookups and sales rankings.
+  `CREATE TABLE IF NOT EXISTS agents (
+    member_key TEXT PRIMARY KEY, mls_id TEXT, full_name TEXT, first_name TEXT, last_name TEXT, email TEXT,
+    mobile_phone TEXT, direct_phone TEXT, preferred_phone TEXT, office_phone TEXT, office_key TEXT, office_mls_id TEXT,
+    office_name TEXT, license TEXT, status TEXT, member_type TEXT, city TEXT, state TEXT, modified TEXT, synced_at TEXT)`,
+  'CREATE INDEX IF NOT EXISTS idx_agents_mls ON agents(mls_id)',
+  'CREATE INDEX IF NOT EXISTS idx_agents_last ON agents(last_name)',
+  'CREATE INDEX IF NOT EXISTS idx_agents_office ON agents(office_key)',
+  `CREATE TABLE IF NOT EXISTS offices (
+    office_key TEXT PRIMARY KEY, mls_id TEXT, name TEXT, phone TEXT, email TEXT, address TEXT, city TEXT, state TEXT,
+    zip TEXT, broker_key TEXT, broker_mls_id TEXT, status TEXT, modified TEXT, synced_at TEXT)`,
+  'CREATE INDEX IF NOT EXISTS idx_offices_mls ON offices(mls_id)',
 ];
+
+// Agent/office columns on listings. Raw MLS Grid keys are kept so they join to agents.member_key / offices.office_key.
+export const AGENT_COLS = ['list_agent_key', 'list_agent_mls_id', 'list_agent_name', 'co_list_agent_key', 'co_list_agent_mls_id', 'co_list_agent_name',
+  'list_office_key', 'list_office_mls_id', 'buyer_agent_key', 'buyer_agent_mls_id', 'buyer_agent_name', 'co_buyer_agent_key',
+  'co_buyer_agent_mls_id', 'co_buyer_agent_name', 'buyer_office_key', 'buyer_office_mls_id', 'buyer_office_name'];
+// Bump when new listing fields are added, so existing records are re-downloaded once (see sync.js backfill).
+export const LISTING_FIELDS_VERSION = 2;
 
 let schemaReady = false;
 // Columns added after the first deploy. Each runs once; "duplicate column" errors are expected afterwards.
@@ -32,6 +51,23 @@ const MIGRATIONS = [
   'ALTER TABLE listings ADD COLUMN basement_total_sqft REAL',
   'ALTER TABLE listings ADD COLUMN bsmt_estimated INTEGER',
   'ALTER TABLE listings ADD COLUMN sqft_note TEXT',
+  // Agent and office IDs on each listing (list side and buyer side).
+  ...AGENT_COLS.map((c) => `ALTER TABLE listings ADD COLUMN ${c} TEXT`),
+  'CREATE INDEX IF NOT EXISTS idx_listings_list_agent ON listings(list_agent_key)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_co_list_agent ON listings(co_list_agent_key)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_buyer_agent ON listings(buyer_agent_key)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_co_buyer_agent ON listings(co_buyer_agent_key)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_list_office ON listings(list_office_key)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_buyer_office ON listings(buyer_office_key)',
+  'ALTER TABLE sync_state ADD COLUMN listing_fields_version INTEGER',
+  'ALTER TABLE sync_state ADD COLUMN backfill_high_water TEXT',
+  'ALTER TABLE sync_state ADD COLUMN backfill_done_at TEXT',
+  'ALTER TABLE sync_state ADD COLUMN member_mode TEXT',
+  'ALTER TABLE sync_state ADD COLUMN member_high_water TEXT',
+  'ALTER TABLE sync_state ADD COLUMN member_error TEXT',
+  'ALTER TABLE sync_state ADD COLUMN office_mode TEXT',
+  'ALTER TABLE sync_state ADD COLUMN office_high_water TEXT',
+  'ALTER TABLE sync_state ADD COLUMN office_error TEXT',
 ];
 
 export async function ensureSchema(db) {
@@ -51,12 +87,15 @@ export const SELECT_FIELDS = [
   'CumulativeDaysOnMarket', 'BedroomsTotal', 'BathroomsFull', 'BathroomsHalf', 'LivingArea', 'AboveGradeFinishedArea',
   'BelowGradeFinishedArea', 'GarageSpaces', 'YearBuilt', 'LotSizeAcres', 'ArchitecturalStyle', 'Basement', 'PublicRemarks',
   'ListOfficeName', 'MRD_BSMNT_SQFT',
+  'ListAgentKey', 'ListAgentMlsId', 'ListAgentFullName', 'CoListAgentKey', 'CoListAgentMlsId', 'CoListAgentFullName',
+  'ListOfficeKey', 'ListOfficeMlsId', 'BuyerAgentKey', 'BuyerAgentMlsId', 'BuyerAgentFullName', 'CoBuyerAgentKey',
+  'CoBuyerAgentMlsId', 'CoBuyerAgentFullName', 'BuyerOfficeKey', 'BuyerOfficeMlsId', 'BuyerOfficeName',
 ];
 
 const COLS = ['listing_key', 'mls_number', 'status', 'property_type', 'property_subtype', 'address', 'street_number', 'street_name',
   'unit', 'city', 'state', 'zip', 'county', 'lat', 'lon', 'list_price', 'original_list_price', 'close_price', 'close_date',
   'list_date', 'dom', 'beds', 'baths_full', 'baths_half', 'living_area', 'above_grade_sqft', 'below_grade_finished_sqft',
-  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'basement_total_sqft', 'bsmt_estimated', 'sqft_note', 'modified', 'synced_at'];
+  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'basement_total_sqft', 'bsmt_estimated', 'sqft_note', 'modified', 'synced_at', ...AGENT_COLS];
 
 const pick = (r, ...keys) => {
   for (const k of keys) { const v = r[k]; if (v !== undefined && v !== null && v !== '') return v; }
@@ -65,6 +104,7 @@ const pick = (r, ...keys) => {
 const n = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? null : Number(v));
 const list = (v) => (Array.isArray(v) ? v.join(', ') : v == null ? null : String(v));
 const date = (v) => (v ? String(v).slice(0, 10) : null);
+const str = (v) => (v === undefined || v === null || v === '' ? null : String(v));
 
 // MLS Grid puts an MLS prefix on key fields (e.g. MRD...). It must be removed before display.
 export const stripPrefix = (v, prefix) => (v == null ? null : prefix && String(v).toUpperCase().startsWith(prefix.toUpperCase()) ? String(v).slice(prefix.length) : String(v));
@@ -133,7 +173,91 @@ export function mapRecord(r, syncedAt, prefix, opts) {
     list_office: pick(r, 'ListOfficeName'),
     modified: pick(r, 'ModificationTimestamp'),
     synced_at: syncedAt,
+    list_agent_key: str(r.ListAgentKey),
+    list_agent_mls_id: stripPrefix(pick(r, 'ListAgentMlsId'), prefix),
+    list_agent_name: pick(r, 'ListAgentFullName'),
+    co_list_agent_key: str(r.CoListAgentKey),
+    co_list_agent_mls_id: stripPrefix(pick(r, 'CoListAgentMlsId'), prefix),
+    co_list_agent_name: pick(r, 'CoListAgentFullName'),
+    list_office_key: str(r.ListOfficeKey),
+    list_office_mls_id: stripPrefix(pick(r, 'ListOfficeMlsId'), prefix),
+    buyer_agent_key: str(r.BuyerAgentKey),
+    buyer_agent_mls_id: stripPrefix(pick(r, 'BuyerAgentMlsId'), prefix),
+    buyer_agent_name: pick(r, 'BuyerAgentFullName'),
+    co_buyer_agent_key: str(r.CoBuyerAgentKey),
+    co_buyer_agent_mls_id: stripPrefix(pick(r, 'CoBuyerAgentMlsId'), prefix),
+    co_buyer_agent_name: pick(r, 'CoBuyerAgentFullName'),
+    buyer_office_key: str(r.BuyerOfficeKey),
+    buyer_office_mls_id: stripPrefix(pick(r, 'BuyerOfficeMlsId'), prefix),
+    buyer_office_name: pick(r, 'BuyerOfficeName'),
   };
+}
+
+// MLS Grid Member record -> agents row.
+export function mapMember(r, syncedAt, prefix) {
+  return {
+    member_key: String(r.MemberKey),
+    mls_id: stripPrefix(pick(r, 'MemberMlsId'), prefix),
+    full_name: pick(r, 'MemberFullName') || [r.MemberFirstName, r.MemberLastName].filter(Boolean).join(' ') || null,
+    first_name: pick(r, 'MemberFirstName'),
+    last_name: pick(r, 'MemberLastName'),
+    email: pick(r, 'MemberEmail'),
+    mobile_phone: pick(r, 'MemberMobilePhone'),
+    direct_phone: pick(r, 'MemberDirectPhone'),
+    preferred_phone: pick(r, 'MemberPreferredPhone'),
+    office_phone: pick(r, 'MemberOfficePhone'),
+    office_key: str(r.OfficeKey),
+    office_mls_id: stripPrefix(pick(r, 'OfficeMlsId'), prefix),
+    office_name: pick(r, 'OfficeName'),
+    license: pick(r, 'MemberStateLicense'),
+    status: pick(r, 'MemberStatus'),
+    member_type: pick(r, 'MemberType'),
+    city: pick(r, 'MemberCity'),
+    state: pick(r, 'MemberStateOrProvince'),
+    modified: pick(r, 'ModificationTimestamp'),
+    synced_at: syncedAt,
+  };
+}
+
+// MLS Grid Office record -> offices row.
+export function mapOffice(r, syncedAt, prefix) {
+  return {
+    office_key: String(r.OfficeKey),
+    mls_id: stripPrefix(pick(r, 'OfficeMlsId'), prefix),
+    name: pick(r, 'OfficeName'),
+    phone: pick(r, 'OfficePhone'),
+    email: pick(r, 'OfficeEmail'),
+    address: [r.OfficeAddress1, r.OfficeAddress2].filter(Boolean).join(' ') || null,
+    city: pick(r, 'OfficeCity'),
+    state: pick(r, 'OfficeStateOrProvince'),
+    zip: r.OfficePostalCode ? String(r.OfficePostalCode).slice(0, 5) : null,
+    broker_key: str(r.OfficeBrokerKey),
+    broker_mls_id: stripPrefix(pick(r, 'OfficeBrokerMlsId'), prefix),
+    status: pick(r, 'OfficeStatus'),
+    modified: pick(r, 'ModificationTimestamp'),
+    synced_at: syncedAt,
+  };
+}
+
+export const AGENT_TABLE_COLS = ['member_key', 'mls_id', 'full_name', 'first_name', 'last_name', 'email', 'mobile_phone', 'direct_phone',
+  'preferred_phone', 'office_phone', 'office_key', 'office_mls_id', 'office_name', 'license', 'status', 'member_type', 'city', 'state', 'modified', 'synced_at'];
+export const OFFICE_TABLE_COLS = ['office_key', 'mls_id', 'name', 'phone', 'email', 'address', 'city', 'state', 'zip', 'broker_key',
+  'broker_mls_id', 'status', 'modified', 'synced_at'];
+
+// Generic upsert / delete for the agents and offices tables.
+export async function upsertTable(db, table, cols, rows) {
+  const sql = `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})
+    ON CONFLICT(${cols[0]}) DO UPDATE SET ${cols.slice(1).map((c) => `${c} = excluded.${c}`).join(', ')}`;
+  for (let i = 0; i < rows.length; i += 50) {
+    const chunk = rows.slice(i, i + 50);
+    await db.batch(chunk.map((row) => db.prepare(sql).bind(...cols.map((c) => (row[c] === undefined ? null : row[c])))));
+  }
+}
+export async function deleteFromTable(db, table, keyCol, keys) {
+  for (let i = 0; i < keys.length; i += 90) {
+    const chunk = keys.slice(i, i + 90);
+    await db.prepare(`DELETE FROM ${table} WHERE ${keyCol} IN (${chunk.map(() => '?').join(', ')})`).bind(...chunk).run();
+  }
 }
 
 const UPSERT_SQL = `INSERT INTO listings (${COLS.join(', ')}) VALUES (${COLS.map(() => '?').join(', ')})
@@ -197,7 +321,38 @@ export async function stats(db) {
   const byStatus = (await db.prepare('SELECT state, status, COUNT(*) AS n FROM listings GROUP BY state, status ORDER BY state, n DESC').all()).results || [];
   const total = (await db.prepare('SELECT COUNT(*) AS n FROM listings').first()) || { n: 0 };
   const lastClose = (await db.prepare('SELECT MAX(close_date) AS d FROM listings').first()) || {};
-  return { total: total.n, lastCloseDate: lastClose.d || null, byStatus };
+  const agents = (await db.prepare('SELECT COUNT(*) AS n FROM agents').first()) || { n: 0 };
+  const offices = (await db.prepare('SELECT COUNT(*) AS n FROM offices').first()) || { n: 0 };
+  const withAgent = (await db.prepare('SELECT COUNT(*) AS n FROM listings WHERE list_agent_key IS NOT NULL').first()) || { n: 0 };
+  return { total: total.n, lastCloseDate: lastClose.d || null, byStatus, agents: agents.n, offices: offices.n, listings_with_agent_ids: withAgent.n };
+}
+
+export async function agentByKey(db, key) {
+  if (!key) return null;
+  return db.prepare('SELECT a.*, o.phone AS office_main_phone FROM agents a LEFT JOIN offices o ON o.office_key = a.office_key WHERE a.member_key = ?').bind(key).first();
+}
+
+/** Search agents by MLS ID, name words and/or office name. */
+export async function searchAgents(db, { mlsId, name, office, limit }) {
+  const where = [], args = [];
+  if (mlsId) { where.push('a.mls_id = ?'); args.push(String(mlsId)); }
+  for (const w of String(name || '').split(/[\s,]+/).filter(Boolean)) { where.push('a.full_name LIKE ?'); args.push(`%${w}%`); }
+  if (office) { where.push('(a.office_name LIKE ? OR o.name LIKE ?)'); args.push(`%${office}%`, `%${office}%`); }
+  if (!where.length) return [];
+  const sql = `SELECT a.*, o.name AS office_full_name, o.phone AS office_main_phone, o.address AS office_address, o.city AS office_city,
+    o.state AS office_state, o.zip AS office_zip FROM agents a LEFT JOIN offices o ON o.office_key = a.office_key
+    WHERE ${where.join(' AND ')} ORDER BY a.last_name, a.first_name LIMIT ?`;
+  return ((await db.prepare(sql).bind(...args, limit || 10).all()).results) || [];
+}
+
+/** An agent's activity in the stored (service-area) listings since a date. */
+export async function agentActivity(db, key, since) {
+  return db.prepare(`SELECT
+    SUM(CASE WHEN (list_agent_key = ?1 OR co_list_agent_key = ?1) AND list_date >= ?2 THEN 1 ELSE 0 END) AS listings_taken,
+    SUM(CASE WHEN (list_agent_key = ?1 OR co_list_agent_key = ?1) AND status = 'Closed' AND close_date >= ?2 THEN 1 ELSE 0 END) AS closed_list_side,
+    SUM(CASE WHEN (buyer_agent_key = ?1 OR co_buyer_agent_key = ?1) AND status = 'Closed' AND close_date >= ?2 THEN 1 ELSE 0 END) AS closed_buyer_side,
+    SUM(CASE WHEN (list_agent_key = ?1 OR co_list_agent_key = ?1) AND status IN ('Active','Coming Soon','Pending','Active Under Contract') THEN 1 ELSE 0 END) AS current_listings
+    FROM listings WHERE list_agent_key = ?1 OR co_list_agent_key = ?1 OR buyer_agent_key = ?1 OR co_buyer_agent_key = ?1`).bind(key, since).first();
 }
 
 export async function logUsage(db, agent, tool, summary) {

@@ -90,12 +90,14 @@ export function fakeMlsGrid(records, pageSize, opts) {
     const u = new URL(url);
     const skip = Number(u.searchParams.get('$skip') || 0);
     const filter = decodeURIComponent(u.searchParams.get('$filter') || '');
-    let pool = records;
+    const resource = u.pathname.split('/').pop();
+    if (resource !== 'Property' && opts.rosterStatus) return new Response('not in subscription', { status: opts.rosterStatus });
+    let pool = resource === 'Member' ? opts.members || [] : resource === 'Office' ? opts.offices || [] : records;
     const gt = filter.match(/ModificationTimestamp gt (\S+)/);
     if (gt) pool = pool.filter((r) => r.ModificationTimestamp > gt[1]);
     if (filter.includes('MlgCanView eq true')) pool = pool.filter((r) => r.MlgCanView !== false);
     if (opts.rejectTypeFilter && filter.includes('PropertyType')) return new Response('bad filter', { status: 400 });
-    if (filter.includes("PropertyType eq 'Residential'")) pool = pool.filter((r) => r.PropertyType === 'Residential');
+    if (resource === 'Property' && filter.includes("PropertyType eq 'Residential'")) pool = pool.filter((r) => r.PropertyType === 'Residential');
     const page = pool.slice(skip, skip + pageSize);
     const body = { value: page };
     if (skip + pageSize < pool.length) {
@@ -105,4 +107,18 @@ export function fakeMlsGrid(records, pageSize, opts) {
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   return { fetch, calls };
+}
+
+// Fake MLS Grid Member / Office records.
+export function rosterFixtures() {
+  const ts = (m) => new Date(Date.now() - m * 60000).toISOString();
+  return {
+    members: [
+      { MemberKey: 'MRDA1', MemberMlsId: 'MRD111', MemberFullName: 'Jane Lister', MemberFirstName: 'Jane', MemberLastName: 'Lister', MemberEmail: 'jane@example.com', MemberMobilePhone: '563-555-0101', OfficeKey: 'MRDO1', OfficeMlsId: 'MRD900', OfficeName: 'Example Realty 1', MemberStatus: 'Active', OriginatingSystemName: 'mred', MlgCanView: true, ModificationTimestamp: ts(50) },
+      { MemberKey: 'MRDA2', MemberMlsId: 'MRD222', MemberFullName: 'Bob Buyer', MemberFirstName: 'Bob', MemberLastName: 'Buyer', MemberEmail: 'bob@example.com', MemberDirectPhone: '309-555-0202', OfficeKey: 'MRDO2', OfficeName: 'Other Realty', MemberStatus: 'Active', OriginatingSystemName: 'mred', MlgCanView: true, ModificationTimestamp: ts(40) },
+    ],
+    offices: [
+      { OfficeKey: 'MRDO1', OfficeMlsId: 'MRD900', OfficeName: 'Example Realty 1', OfficePhone: '563-555-0000', OfficeAddress1: '1 Main St', OfficeCity: 'Davenport', OfficeStateOrProvince: 'IA', OfficePostalCode: '52801', OriginatingSystemName: 'mred', MlgCanView: true, ModificationTimestamp: ts(30) },
+    ],
+  };
 }
