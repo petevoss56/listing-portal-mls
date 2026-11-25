@@ -1,5 +1,5 @@
 // Minimal MCP server (Streamable HTTP, JSON responses, stateless) — what Claude's custom connector talks to.
-import { TOOLS, callTool } from './tools.js';
+import { TOOLS, callTool, usageSummary } from './tools.js';
 import { VERSION } from './config.js';
 import { logUsage } from './db.js';
 
@@ -9,7 +9,8 @@ const INSTRUCTIONS = 'MRED MLS data for the 3% Listing Co. service area (Quad Ci
   'Data use rules (MLS GRID license and AI Use Addendum): use results only to answer the current request; do not save MLS data to memory, ' +
   'files or knowledge bases; keep listing attribution (MRED via MLS GRID, listing office) with any listing you show; share with a client only ' +
   'the facts needed to support that client\'s estimate of value. The MLS does not record condition, so ask the agent for condition grades when they matter. ' +
-  'Use find_agent (or get_listing for a specific listing) to look up an agent\'s contact info and local activity; agent contact info is for 3% Listing Co. in-house use only.';
+  'Use find_agent (or get_listing for a specific listing) to look up an agent\'s contact info and local activity; agent contact info is for 3% Listing Co. in-house use only. ' +
+  'Use find_listings_by_status for prospecting lists (expired, canceled, stale listings) by city, price and date; these lists are for in-house prospecting only.';
 
 const rpc = (id, result) => ({ jsonrpc: '2.0', id, result });
 const rpcErr = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
@@ -50,7 +51,7 @@ async function handleOne(m, env, agent, fetchImpl) {
       if (!TOOLS.some((t) => t.name === name)) return rpcErr(m.id, -32602, `Unknown tool: ${name}`);
       try {
         const result = await callTool(env, name, args, fetchImpl);
-        await logUsage(env.DB, agent, name, args.address || args.mls_number || args.name || args.mls_id || args.office || '');
+        await logUsage(env.DB, agent, name, usageSummary(name, args));
         return rpc(m.id, { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }], isError: !!(result && result.error) });
       } catch (e) {
         return rpc(m.id, { content: [{ type: 'text', text: 'Tool failed: ' + e.message }], isError: true });

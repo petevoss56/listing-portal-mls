@@ -1,7 +1,7 @@
 // The tools Claude (and the Listing Portal) can call.
 import { runCma, candidates, compSqft } from './cma.js';
 import { geocode } from './geo.js';
-import { listingByMls, searchByAddress, stats, getSyncState, recentUsage, stripPrefix, agentByKey, searchAgents, agentActivity } from './db.js';
+import { listingByMls, searchByAddress, stats, getSyncState, recentUsage, stripPrefix, agentByKey, searchAgents, agentActivity, searchByStatus, OFF_MARKET_STATUSES, LISTING_FIELDS_VERSION } from './db.js';
 import { VERSION, config } from './config.js';
 
 // Every response carries attribution (AI Use Addendum 3(d)) and the permitted-use reminder.
@@ -97,6 +97,35 @@ export const TOOLS = [
     },
   },
   {
+    name: 'find_listings_by_status',
+    title: 'Find listings by status (expired, canceled, stale)',
+    description: 'Prospecting search: listings in given cities or ZIP codes by status, e.g. expired or canceled in the last 90 days, or active listings sitting 90+ days. ' +
+      'Filters by price, date the listing reached its status, days on market and price reductions. Expired/canceled/withdrawn listings whose address has since been relisted or sold are left out unless include_relisted is true. ' +
+      'Results come in pages (limit + offset). In-house prospecting use only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        statuses: { type: 'array', items: { type: 'string', enum: ['Expired', 'Canceled', 'Withdrawn', 'Hold', 'Active', 'Coming Soon', 'Pending', 'Active Under Contract', 'Closed'] }, description: 'Statuses to include, e.g. ["Expired","Canceled"]' },
+        cities: { type: 'array', items: { type: 'string' }, description: 'City names, e.g. ["Davenport","Bettendorf","LeClaire"]. Spacing and case are ignored (Le Claire = LeClaire).' },
+        zips: { type: 'array', items: { type: 'string' }, description: 'ZIP codes (used together with cities: a listing matching either is included)' },
+        state: { type: 'string', enum: ['IA', 'IL'] },
+        min_price: { type: 'number', description: 'Lowest list price (last list price for expired/canceled)' },
+        max_price: { type: 'number' },
+        days_back: { type: 'integer', description: 'Only listings that reached their status in the last N days. Default 90 for expired/canceled/withdrawn/hold/closed; no limit for active statuses.' },
+        status_since: { type: 'string', description: 'Alternative to days_back: earliest status date, YYYY-MM-DD' },
+        status_until: { type: 'string', description: 'Latest status date, YYYY-MM-DD' },
+        min_dom: { type: 'integer', description: 'Minimum cumulative days on market, e.g. 90 for stale actives' },
+        price_reduced_only: { type: 'boolean', description: 'Only listings whose list price is below the original list price' },
+        include_relisted: { type: 'boolean', description: 'Keep expired/canceled listings whose address has since been relisted or sold (default false)' },
+        property_kind: { type: 'string', enum: ['detached', 'attached', 'any'], description: 'Default any' },
+        sort: { type: 'string', enum: ['newest_status', 'dom', 'price'], description: 'Default newest_status (dom for active-only searches)' },
+        limit: { type: 'integer', description: 'Results per page (default and max 25)' },
+        offset: { type: 'integer', description: 'Skip this many results (for the next page, use next_offset)' },
+      },
+      required: ['statuses'],
+    },
+  },
+  {
     name: 'sync_status',
     title: 'MLS data status',
     description: 'How current the MLS copy is: last sync, record counts by state and status, and recent usage.',
@@ -179,6 +208,15 @@ async function coordStats(db, s) {
   return { comp_ready_listings: r.total || 0, with_coordinates: r.with_coords || 0, address_not_found: r.not_found || 0, last_geocode_run: last };
 }
 
+/** Short description of a call for the usage log. */
+export function usageSummary(name, a) {
+  a = a || {};
+  if (name === 'find_listings_by_status') {
+    return [(a.statuses || []).join('/'), [...(a.cities || []), ...(a.zips || [])].join(', '), a.min_price ? `>= $${a.min_price}` : '', a.min_dom ? `${a.min_dom}+ DOM` : '', a.offset ? `offset ${a.offset}` : ''].filter(Boolean).join(' | ');
+  }
+  return a.address || a.mls_number || a.name || a.mls_id || a.office || '';
+}
+
 export async function callTool(env, name, a, fetchImpl) {
   const out = await callToolInner(env, name, a || {}, fetchImpl);
   return out && typeof out === 'object' && !out.error ? Object.assign({ source: ATTRIBUTION }, out) : out;
@@ -258,6 +296,47 @@ async function callToolInner(env, name, a, fetchImpl) {
     const rows = await searchByAddress(db, a.address, Math.min(a.limit || 10, cfg.maxResults));
     return { count: rows.length, results: rows.map(brief) };
   }
+  if (name === 'find_listings_by_status') {
+    const statuses = [...new Set((a.statuses || []).map(String))];
+    if (!statuses.length) return { error: 'Give at least one status, e.g. ["Expired","Canceled"].' };
+    const cities = (a.cities || []).filter(Boolean), zips = (a.zips || []).filter(Boolean);
+    if (!cities.length && !zips.length) return { error: 'Give at least one city or ZIP code to search.' };
+    const offMarket = statuses.some((x) => OFF_MARKET_STATUSES.includes(x) || x === 'Closed');
+    const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+    if (a.status_since && !isDate(a.status_since)) return { error: 'status_since must be YYYY-MM-DD.' };
+    if (a.status_until && !isDate(a.status_until)) return { error: 'status_until must be YYYY-MM-DD.' };
+    const daysBack = a.days_back != null ? Number(a.days_back) : offMarket ? 90 : null;
+    const since = a.status_since || (daysBack ? new Date(Date.now() - daysBack * 864e5).toISOString().slice(0, 10) : null);
+    const limit = Math.max(1, Math.min(Number(a.limit) || cfg.maxResults, cfg.maxResults));
+    const offset = Math.max(0, Number(a.offset) || 0);
+    // No bulk copying (AI Use Addendum 3(e)): paging stops at STATUS_SEARCH_MAX_TOTAL results per search.
+    if (offset >= cfg.statusSearchMaxTotal) return { error: `This search can page through at most ${cfg.statusSearchMaxTotal} results. Narrow it (fewer cities, a higher min_price or a shorter date range).` };
+    const pageSize = Math.min(limit, cfg.statusSearchMaxTotal - offset);
+    const { total, rows } = await searchByStatus(db, {
+      statuses, cities, zips, state: a.state ? String(a.state).toUpperCase() : null,
+      minPrice: a.min_price != null ? Number(a.min_price) : null, maxPrice: a.max_price != null ? Number(a.max_price) : null,
+      since, until: a.status_until || null, minDom: a.min_dom != null ? Number(a.min_dom) : null,
+      reducedOnly: !!a.price_reduced_only, kind: a.property_kind || 'any', excludeRelisted: !a.include_relisted,
+      sort: a.sort || (offMarket ? 'newest_status' : 'dom'), limit: pageSize, offset,
+    });
+    const reachable = Math.min(total, cfg.statusSearchMaxTotal);
+    const st = await getSyncState(db);
+    const notes = [];
+    if (statuses.includes('Canceled') || statuses.includes('Withdrawn') || statuses.includes('Hold')) notes.push('Canceled, withdrawn or held listings may still be under a listing agreement with the listing brokerage; confirm the agreement has ended before contacting the owner.');
+    if ((st.listing_fields_version || 1) < 3) notes.push('Status dates are still being filled in from MLS Grid; until then the last-modified date stands in for the status date.');
+    if (total > reachable) notes.push(`${total} listings match, but only the first ${reachable} can be paged through. Narrow the search to see the rest.`);
+    return {
+      search: { statuses, cities, zips, min_price: a.min_price ?? null, max_price: a.max_price ?? null, status_since: since, status_until: a.status_until || null, min_dom: a.min_dom ?? null, relisted_excluded: !a.include_relisted },
+      total_matches: total, offset, count: rows.length,
+      next_offset: offset + rows.length < reachable ? offset + rows.length : null,
+      results: rows.map((x) => Object.assign(brief(x), {
+        status_date: x.status_date,
+        price_change: x.original_list_price && x.list_price ? Math.round(x.list_price - x.original_list_price) : null,
+        listing_agent: x.list_agent_name || null,
+      })),
+      notes,
+    };
+  }
   if (name === 'sync_status') {
     const s = await getSyncState(db);
     return {
@@ -269,6 +348,7 @@ async function callToolInner(env, name, a, fetchImpl) {
         members_error: s.member_error || null, offices_error: s.office_error || null,
         members_initial_import_done: s.member_mode === 'incremental', offices_initial_import_done: s.office_mode === 'incremental',
         listing_agent_ids: (s.listing_fields_version || 1) >= 2 ? 'complete' : s.mode === 'incremental' ? `backfilling (through ${s.backfill_high_water || 'start'})` : 'after first import',
+        status_dates: (s.listing_fields_version || 1) >= LISTING_FIELDS_VERSION ? 'complete' : s.mode === 'incremental' ? `backfilling (through ${s.backfill_high_water || 'start'})` : 'after first import',
       },
       map_coordinates: await coordStats(db, s), mls_fields: inventorySummary(s.field_inventory),
       recent_usage: await recentUsage(db, 10),

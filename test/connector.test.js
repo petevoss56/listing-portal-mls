@@ -4,7 +4,7 @@ import { makeEnv, fixtureRecords, fakeMlsGrid, rec, rosterFixtures } from './hel
 import { runSync, buildUrl } from '../src/sync.js';
 import { config } from '../src/config.js';
 import worker from '../src/index.js';
-import { getSyncState } from '../src/db.js';
+import { getSyncState, LISTING_FIELDS_VERSION } from '../src/db.js';
 
 const SUBJECT = { address: '709 40th Ave', city: 'East Moline', state: 'IL', sqft_above_grade: 1110, beds: 3, baths_full: 1, baths_half: 0, garage_spaces: 1, basement_finished_sqft: 0, year_built: 1961 };
 
@@ -218,7 +218,7 @@ test('MCP: initialize, tools/list and notifications behave per protocol', async 
   assert.equal(note.status, 202);
   const list = await (await mcp(env, { jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   const names = list.result.tools.map((t) => t.name);
-  assert.deepEqual(names, ['run_cma', 'find_sold_comps', 'find_active_listings', 'get_listing', 'search_listings_by_address', 'find_agent', 'sync_status']);
+  assert.deepEqual(names, ['run_cma', 'find_sold_comps', 'find_active_listings', 'get_listing', 'search_listings_by_address', 'find_agent', 'find_listings_by_status', 'sync_status']);
   const unknown = await (await mcp(env, { jsonrpc: '2.0', id: 3, method: 'nope' })).json();
   assert.equal(unknown.error.code, -32601);
   const get = await worker.fetch(new Request('https://x.test/mcp', { headers: { Authorization: 'Bearer pete-key-0123456789abcdef' } }), env);
@@ -392,7 +392,7 @@ test('existing databases get agent IDs through a paced one-time backfill', async
   assert.equal(r.backfill.done, true);
   assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM listings WHERE list_agent_key IS NULL').first()).n, 0);
   const st = await getSyncState(env.DB);
-  assert.equal(st.listing_fields_version, 2);
+  assert.equal(st.listing_fields_version, LISTING_FIELDS_VERSION);
   assert.equal(st.backfill_high_water, null);
   const again = await runSync(env, { fetch: fakeMlsGrid(recs, 5).fetch, sleep: async () => {} });
   assert.equal(again.backfill.needed, false);
@@ -421,4 +421,103 @@ test('find_agent returns contact info and local activity; get_listing names the 
   assert.equal(one.buyer_agent.office, 'Other Realty');
   const log = await env.DB.prepare("SELECT summary FROM usage_log WHERE tool = 'find_agent'").all();
   assert.equal(log.results[0].summary, 'jane');
+});
+
+
+// ---- find_listings_by_status (prospecting: expired, canceled, stale) ----
+const ago = (d) => new Date(Date.now() - d * 864e5).toISOString();
+async function syncedProspects() {
+  const env = makeEnv();
+  const recs = fixtureRecords();
+  const iaCity = { StateOrProvince: 'IA', CountyOrParish: 'Scott', PostalCode: '52722' };
+  const more = [
+    // Expired 20 days ago in Bettendorf, $300k, listed 120 days
+    rec(Object.assign({ StreetNumber: '10', StreetName: 'Oak', StreetSuffix: 'Ln', StandardStatus: 'Expired', ListPrice: 300000, OriginalListPrice: 325000, City: 'Bettendorf', StatusChangeTimestamp: ago(20), ListingContractDate: ago(140).slice(0, 10), CumulativeDaysOnMarket: 120, ListAgentFullName: 'Pat Agent' }, iaCity)),
+    // Canceled 10 days ago in LeClaire (MLS spells it "Le Claire"), $450k
+    rec(Object.assign({ StreetNumber: '22', StreetName: 'River', StreetSuffix: 'Rd', StandardStatus: 'Canceled', ListPrice: 450000, City: 'Le Claire', PostalCode: '52753', StatusChangeTimestamp: ago(10), ListingContractDate: ago(60).slice(0, 10) }, { StateOrProvince: 'IA', CountyOrParish: 'Scott' })),
+    // Expired but too cheap
+    rec(Object.assign({ StreetNumber: '30', StreetName: 'Elm', StreetSuffix: 'St', StandardStatus: 'Expired', ListPrice: 150000, City: 'Bettendorf', StatusChangeTimestamp: ago(15) }, iaCity)),
+    // Expired too long ago (200 days)
+    rec(Object.assign({ StreetNumber: '40', StreetName: 'Pine', StreetSuffix: 'St', StandardStatus: 'Expired', ListPrice: 400000, City: 'Bettendorf', StatusChangeTimestamp: ago(200) }, iaCity)),
+    // Expired, then relisted at the same address (should be left out by default)
+    rec(Object.assign({ StreetNumber: '50', StreetName: 'Maple', StreetSuffix: 'Dr', StandardStatus: 'Expired', ListPrice: 350000, City: 'Bettendorf', StatusChangeTimestamp: ago(30), ListingContractDate: ago(200).slice(0, 10) }, iaCity)),
+    rec(Object.assign({ StreetNumber: '50', StreetName: 'Maple', StreetSuffix: 'Dr', StandardStatus: 'Active', ListPrice: 339000, City: 'Bettendorf', ListingContractDate: ago(20).slice(0, 10), CumulativeDaysOnMarket: 20 }, iaCity)),
+    // Stale active: 150 days on market, $280k, price reduced
+    rec(Object.assign({ StreetNumber: '60', StreetName: 'Cedar', StreetSuffix: 'Ct', StandardStatus: 'Active', ListPrice: 280000, OriginalListPrice: 299000, City: 'Bettendorf', CumulativeDaysOnMarket: 150 }, iaCity)),
+    // Expired but IDX-only (not Back Office) — never shown
+    rec(Object.assign({ StreetNumber: '70', StreetName: 'Birch', StreetSuffix: 'Ave', StandardStatus: 'Expired', ListPrice: 500000, City: 'Bettendorf', StatusChangeTimestamp: ago(5), MlgCanUse: ['IDX'] }, iaCity)),
+    // Expired with no status-change date: falls back to last-modified date
+    rec(Object.assign({ StreetNumber: '80', StreetName: 'Walnut', StreetSuffix: 'St', StandardStatus: 'Expired', ListPrice: 260000, City: 'Bettendorf' }, iaCity)),
+  ];
+  const all = recs.concat(more);
+  await runSync(env, { fetch: fakeMlsGrid(all, 50).fetch, sleep: async () => {} });
+  return { env };
+}
+
+test('find_listings_by_status: expired/canceled by city, price and date, relisted left out', async () => {
+  const { env } = await syncedProspects();
+  const { isError, data } = await callTool(env, 'find_listings_by_status', { statuses: ['Expired', 'Canceled'], cities: ['Bettendorf', 'LeClaire'], min_price: 250000 });
+  assert.equal(isError, false, JSON.stringify(data));
+  const addrs = data.results.map((r) => r.address).sort();
+  assert.deepEqual(addrs, ['10 Oak Ln', '22 River Rd', '80 Walnut St']);
+  assert.equal(data.total_matches, 3);
+  assert.equal(data.results[0].address, '80 Walnut St', 'newest status date first (falls back to last-modified date)');
+  const oak = data.results.find((r) => r.address === '10 Oak Ln');
+  assert.equal(oak.status_date, ago(20).slice(0, 10));
+  assert.equal(oak.price_change, -25000);
+  assert.equal(oak.listing_agent, 'Pat Agent');
+  assert.ok(oak.listing_office);
+  assert.match(data.source, /MRED.*MLS GRID/);
+  assert.ok(data.notes.some((n) => /listing agreement/.test(n)), 'canceled caution included');
+  const withRelisted = (await callTool(env, 'find_listings_by_status', { statuses: ['Expired'], cities: ['bettendorf'], min_price: 250000, include_relisted: true })).data;
+  assert.ok(withRelisted.results.some((r) => r.address === '50 Maple Dr'));
+  const longer = (await callTool(env, 'find_listings_by_status', { statuses: ['Expired'], cities: ['Bettendorf'], min_price: 250000, days_back: 365 })).data;
+  assert.ok(longer.results.some((r) => r.address === '40 Pine St'));
+  assert.ok(!longer.results.some((r) => r.address === '70 Birch Ave'), 'IDX-only records never shown');
+});
+
+test('find_listings_by_status: stale actives by days on market and price cut', async () => {
+  const { env } = await syncedProspects();
+  const stale = (await callTool(env, 'find_listings_by_status', { statuses: ['Active'], cities: ['Bettendorf', 'East Moline'], min_dom: 90 })).data;
+  assert.deepEqual(stale.results.map((r) => r.address).sort(), ['220 30th Ave', '60 Cedar Ct']);
+  assert.equal(stale.results[0].address, '60 Cedar Ct', 'most days on market first');
+  const cut = (await callTool(env, 'find_listings_by_status', { statuses: ['Active'], cities: ['Bettendorf'], price_reduced_only: true })).data;
+  assert.deepEqual(cut.results.map((r) => r.address), ['60 Cedar Ct']);
+  const zip = (await callTool(env, 'find_listings_by_status', { statuses: ['Active'], zips: ['61244'], min_dom: 90 })).data;
+  assert.deepEqual(zip.results.map((r) => r.address), ['220 30th Ave']);
+});
+
+test('find_listings_by_status: paging, caps and input checks', async () => {
+  const { env } = await syncedProspects();
+  const p1 = (await callTool(env, 'find_listings_by_status', { statuses: ['Expired', 'Canceled'], cities: ['Bettendorf', 'LeClaire'], min_price: 250000, limit: 2 })).data;
+  assert.equal(p1.count, 2);
+  assert.equal(p1.next_offset, 2);
+  const p2 = (await callTool(env, 'find_listings_by_status', { statuses: ['Expired', 'Canceled'], cities: ['Bettendorf', 'LeClaire'], min_price: 250000, limit: 2, offset: 2 })).data;
+  assert.equal(p2.count, 1);
+  assert.equal(p2.next_offset, null);
+  assert.equal(new Set([...p1.results, ...p2.results].map((r) => r.mls_number)).size, 3, 'pages do not overlap');
+  const big = (await callTool(env, 'find_listings_by_status', { statuses: ['Closed', 'Active', 'Pending'], cities: ['East Moline'], days_back: 3650, limit: 500 })).data;
+  assert.ok(big.count <= 25, 'per-page cap');
+  env.STATUS_SEARCH_MAX_TOTAL = '2';
+  const capped = (await callTool(env, 'find_listings_by_status', { statuses: ['Expired', 'Canceled'], cities: ['Bettendorf', 'LeClaire'], min_price: 250000 })).data;
+  assert.equal(capped.count, 2);
+  assert.equal(capped.next_offset, null);
+  assert.ok(capped.notes.some((n) => /only the first 2/.test(n)));
+  assert.equal((await callTool(env, 'find_listings_by_status', { statuses: ['Expired'], cities: ['Bettendorf'], offset: 2 })).isError, true);
+  delete env.STATUS_SEARCH_MAX_TOTAL;
+  assert.equal((await callTool(env, 'find_listings_by_status', { statuses: ['Expired'] })).isError, true, 'needs a city or ZIP');
+  assert.equal((await callTool(env, 'find_listings_by_status', { statuses: [], cities: ['Bettendorf'] })).isError, true);
+  assert.equal((await callTool(env, 'find_listings_by_status', { statuses: ['Expired'], cities: ['Bettendorf'], status_since: '11/01/2026' })).isError, true);
+  const log = await env.DB.prepare("SELECT summary FROM usage_log WHERE tool = 'find_listings_by_status' ORDER BY id LIMIT 1").first();
+  assert.match(log.summary, /Expired\/Canceled \| Bettendorf, LeClaire \| >= \$250000/);
+});
+
+test('status-change dates are requested from MLS Grid and stored', async () => {
+  const { env } = await syncedProspects();
+  const url = decodeURIComponent(buildUrl(config(env), { mode: 'initial', checkpoint: null, useSelect: true }));
+  assert.ok(url.includes('StatusChangeTimestamp') && url.includes('OffMarketDate'));
+  const row = await env.DB.prepare("SELECT status_changed FROM listings WHERE address = '10 Oak Ln'").first();
+  assert.equal(row.status_changed, ago(20).slice(0, 10));
+  const st = (await callTool(env, 'sync_status', {})).data;
+  assert.equal(st.agent_roster.status_dates, 'complete');
 });
