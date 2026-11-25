@@ -32,6 +32,8 @@ ABOVE_GRADE_FROM_LIVING_AREA = "true"
 KEY_PREFIX = "MRD"
 # Largest number of listings returned by one search.
 MAX_RESULTS = "25"
+# Most results one find_listings_by_status search can page through (25 per page).
+STATUS_SEARCH_MAX_TOTAL = "200"
 # Property types pulled from MLS Grid (comma-separated).
 SYNC_PROPERTY_TYPES = "Residential"
 SYNC_PAGE_SIZE = "5000"

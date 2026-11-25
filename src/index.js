@@ -11,7 +11,7 @@ import { runGeocode } from './geocode.js';
 import { saveSyncState } from './db.js';
 
 export const GEOCODE_CRON = '5,20,35,50 * * * *';
-import { callTool, TOOLS } from './tools.js';
+import { callTool, TOOLS, usageSummary } from './tools.js';
 import { ensureSchema, logUsage } from './db.js';
 
 export function authenticate(request, env) {
@@ -48,7 +48,7 @@ export default {
       if (!TOOLS.some((t) => t.name === name)) return json({ error: 'Unknown tool' }, 404);
       const args = await request.json().catch(() => ({}));
       const result = await callTool(env, name, args);
-      await logUsage(env.DB, agent, name, args.address || args.mls_number || args.name || args.mls_id || args.office || '');
+      await logUsage(env.DB, agent, name, usageSummary(name, args));
       return json(result, result && result.error ? 400 : 200);
     }
 

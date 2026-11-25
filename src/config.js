@@ -2,7 +2,7 @@
 //   MLSGRID_TOKEN   (secret)  MLS Grid access token for the Broker Back Office subscription
 //   CONNECTOR_KEYS  (secret)  comma-separated "name:key" pairs, one per person, e.g. "pete:abc123,chris:def456"
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export function config(env) {
   return {
@@ -13,6 +13,7 @@ export function config(env) {
     livingIsAboveGrade: String(env.ABOVE_GRADE_FROM_LIVING_AREA ?? 'true').toLowerCase() === 'true', // MLS Grid key prefix for MRED; stripped before display
     aiEnabled: String(env.AI_ACCESS_ENABLED ?? 'true').toLowerCase() !== 'false', // kill switch for the Claude connector (AI Use Addendum 3(c))
     maxResults: num(env.MAX_RESULTS, 25),
+    statusSearchMaxTotal: num(env.STATUS_SEARCH_MAX_TOTAL, 200), // most results one status search can page through
     serviceArea: parseServiceArea(env.SERVICE_AREA || 'IA:Scott;IL:Rock Island;IL:Henry'),
     pageSize: num(env.SYNC_PAGE_SIZE, 5000),
     // MLS Grid lets us filter by PropertyType on its side (max 5 'or's). Empty = all types.

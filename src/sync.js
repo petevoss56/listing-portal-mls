@@ -229,7 +229,8 @@ async function syncRoster(ctx, roster) {
 }
 
 /**
- * One-time re-download of every visible listing so records stored before agent IDs were added get them.
+ * One-time re-download of every visible listing so records stored before new fields were added (agent IDs,
+ * status-change dates) get them.
  * Walks oldest to newest on its own checkpoint, a few pages per run, alongside the normal 15-minute sync.
  */
 async function backfillListings(ctx, { useSelect, useTypeFilter, dropped }) {
@@ -244,7 +245,7 @@ async function backfillListings(ctx, { useSelect, useTypeFilter, dropped }) {
     try { res = await ctx.request(url); } catch (e) { error = 'Network error: ' + e.message; break; }
     pages++;
     if (res.status === 429) { error = 'MLS Grid rate limit reached (429). Will resume from the checkpoint next run.'; break; }
-    if (!res.ok) { error = `MLS Grid returned ${res.status} during the agent-ID backfill: ${(await res.text().catch(() => '')).slice(0, 200)}`; break; }
+    if (!res.ok) { error = `MLS Grid returned ${res.status} during the listing-field backfill: ${(await res.text().catch(() => '')).slice(0, 200)}`; break; }
     const json = await res.json();
     const p = await saveListingPage(db, cfg, json, now, useTypeFilter);
     saved += p.upserts;

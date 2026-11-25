@@ -38,7 +38,7 @@ export const AGENT_COLS = ['list_agent_key', 'list_agent_mls_id', 'list_agent_na
   'list_office_key', 'list_office_mls_id', 'buyer_agent_key', 'buyer_agent_mls_id', 'buyer_agent_name', 'co_buyer_agent_key',
   'co_buyer_agent_mls_id', 'co_buyer_agent_name', 'buyer_office_key', 'buyer_office_mls_id', 'buyer_office_name'];
 // Bump when new listing fields are added, so existing records are re-downloaded once (see sync.js backfill).
-export const LISTING_FIELDS_VERSION = 2;
+export const LISTING_FIELDS_VERSION = 3; // 3: status_changed (StatusChangeTimestamp / OffMarketDate)
 
 let schemaReady = false;
 // Columns added after the first deploy. Each runs once; "duplicate column" errors are expected afterwards.
@@ -68,6 +68,10 @@ const MIGRATIONS = [
   'ALTER TABLE sync_state ADD COLUMN office_mode TEXT',
   'ALTER TABLE sync_state ADD COLUMN office_high_water TEXT',
   'ALTER TABLE sync_state ADD COLUMN office_error TEXT',
+  // Date the listing last changed status (expired, canceled, ...), for status searches.
+  'ALTER TABLE listings ADD COLUMN status_changed TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_listings_status_city ON listings(status, city)',
+  'CREATE INDEX IF NOT EXISTS idx_listings_street ON listings(street_number, street_name)',
 ];
 
 export async function ensureSchema(db) {
@@ -90,12 +94,13 @@ export const SELECT_FIELDS = [
   'ListAgentKey', 'ListAgentMlsId', 'ListAgentFullName', 'CoListAgentKey', 'CoListAgentMlsId', 'CoListAgentFullName',
   'ListOfficeKey', 'ListOfficeMlsId', 'BuyerAgentKey', 'BuyerAgentMlsId', 'BuyerAgentFullName', 'CoBuyerAgentKey',
   'CoBuyerAgentMlsId', 'CoBuyerAgentFullName', 'BuyerOfficeKey', 'BuyerOfficeMlsId', 'BuyerOfficeName',
+  'StatusChangeTimestamp', 'OffMarketDate',
 ];
 
 const COLS = ['listing_key', 'mls_number', 'status', 'property_type', 'property_subtype', 'address', 'street_number', 'street_name',
   'unit', 'city', 'state', 'zip', 'county', 'lat', 'lon', 'list_price', 'original_list_price', 'close_price', 'close_date',
   'list_date', 'dom', 'beds', 'baths_full', 'baths_half', 'living_area', 'above_grade_sqft', 'below_grade_finished_sqft',
-  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'basement_total_sqft', 'bsmt_estimated', 'sqft_note', 'modified', 'synced_at', ...AGENT_COLS];
+  'garage_spaces', 'year_built', 'lot_acres', 'style', 'basement', 'remarks', 'can_use', 'list_office', 'basement_total_sqft', 'bsmt_estimated', 'sqft_note', 'status_changed', 'modified', 'synced_at', ...AGENT_COLS];
 
 const pick = (r, ...keys) => {
   for (const k of keys) { const v = r[k]; if (v !== undefined && v !== null && v !== '') return v; }
@@ -171,6 +176,7 @@ export function mapRecord(r, syncedAt, prefix, opts) {
     remarks: r.PublicRemarks ? String(r.PublicRemarks).slice(0, 1500) : null,
     can_use: r.MlgCanUse == null ? null : list(r.MlgCanUse),
     list_office: pick(r, 'ListOfficeName'),
+    status_changed: date(pick(r, 'StatusChangeTimestamp', 'OffMarketDate')),
     modified: pick(r, 'ModificationTimestamp'),
     synced_at: syncedAt,
     list_agent_key: str(r.ListAgentKey),
@@ -315,6 +321,55 @@ export async function searchByAddress(db, query, limit) {
     res = await db.prepare('SELECT * FROM listings WHERE address LIKE ? ORDER BY modified DESC LIMIT ?').bind(`%${q}%`, limit || 10).all();
   }
   return res.results || [];
+}
+
+// Statuses where the listing is off the market without a sale; for these, a newer listing or sale of the same
+// address means the owner already relisted or sold, so it is left out by default.
+export const OFF_MARKET_STATUSES = ['Expired', 'Canceled', 'Withdrawn', 'Hold'];
+const LIVE_OR_SOLD = ['Active', 'Coming Soon', 'Pending', 'Active Under Contract', 'Closed'];
+// Date the listing reached its current status: the MLS status-change date, else the last modification.
+const STATUS_DATE = "COALESCE(l.status_changed, substr(l.modified, 1, 10))";
+const normCity = (c) => String(c || '').toLowerCase().replace(/[^a-z]/g, '');
+
+/**
+ * Listings by status in given cities/ZIPs, with price, date and days-on-market filters.
+ * Returns { total, rows }. Only Back Office records (MlgCanUse contains BO) are included.
+ */
+export async function searchByStatus(db, o) {
+  const where = ["(l.can_use IS NULL OR l.can_use LIKE '%BO%')"], args = [];
+  where.push(`l.status IN (${o.statuses.map(() => '?').join(', ')})`); args.push(...o.statuses);
+  const place = [];
+  if (o.cities && o.cities.length) {
+    place.push(`lower(replace(replace(replace(l.city, ' ', ''), '-', ''), '.', '')) IN (${o.cities.map(() => '?').join(', ')})`);
+    args.push(...o.cities.map(normCity));
+  }
+  if (o.zips && o.zips.length) { place.push(`l.zip IN (${o.zips.map(() => '?').join(', ')})`); args.push(...o.zips.map((z) => String(z).slice(0, 5))); }
+  if (place.length) where.push(`(${place.join(' OR ')})`);
+  if (o.state) { where.push('l.state = ?'); args.push(o.state); }
+  if (o.minPrice != null) { where.push('l.list_price >= ?'); args.push(o.minPrice); }
+  if (o.maxPrice != null) { where.push('l.list_price <= ?'); args.push(o.maxPrice); }
+  if (o.since) { where.push(`${STATUS_DATE} >= ?`); args.push(o.since); }
+  if (o.until) { where.push(`${STATUS_DATE} <= ?`); args.push(o.until); }
+  if (o.minDom != null) { where.push('l.dom >= ?'); args.push(o.minDom); }
+  if (o.reducedOnly) where.push('l.original_list_price > l.list_price');
+  if (o.kind && o.kind !== 'any') {
+    const sub = "lower(COALESCE(l.property_subtype, ''))";
+    const attached = `(${sub} LIKE '%condo%' OR ${sub} LIKE '%town%' OR ${sub} LIKE '%duplex%' OR ${sub} LIKE '%co-op%' OR ${sub} LIKE '%coop%' OR (${sub} LIKE '%attached%' AND ${sub} NOT LIKE '%detached%'))`;
+    where.push(o.kind === 'attached' ? attached : `NOT ${attached}`);
+  }
+  if (o.excludeRelisted) {
+    where.push(`NOT (l.status IN (${OFF_MARKET_STATUSES.map(() => '?').join(', ')}) AND EXISTS (SELECT 1 FROM listings r
+      WHERE r.listing_key <> l.listing_key AND r.street_number = l.street_number AND r.street_name = l.street_name
+      AND lower(r.city) = lower(l.city) AND COALESCE(r.unit, '') = COALESCE(l.unit, '')
+      AND r.status IN (${LIVE_OR_SOLD.map(() => '?').join(', ')}) AND COALESCE(r.list_date, '') >= COALESCE(l.list_date, '')))`);
+    args.push(...OFF_MARKET_STATUSES, ...LIVE_OR_SOLD);
+  }
+  const order = o.sort === 'dom' ? 'l.dom DESC' : o.sort === 'price' ? 'l.list_price DESC' : `${STATUS_DATE} DESC`;
+  const w = where.join(' AND ');
+  const total = ((await db.prepare(`SELECT COUNT(*) AS n FROM listings l WHERE ${w}`).bind(...args).first()) || { n: 0 }).n;
+  const rows = ((await db.prepare(`SELECT l.*, ${STATUS_DATE} AS status_date FROM listings l WHERE ${w} ORDER BY ${order}, l.listing_key LIMIT ? OFFSET ?`)
+    .bind(...args, o.limit, o.offset || 0).all()).results) || [];
+  return { total, rows };
 }
 
 export async function stats(db) {

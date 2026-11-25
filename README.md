@@ -19,6 +19,7 @@ Keeps a private copy of MRED listings for the Quad Cities (from MLS Grid) and le
 | `get_listing` | One listing by MLS number, including remarks and the listing/buyer agents with contact info |
 | `search_listings_by_address` | Past and current MLS records for an address |
 | `find_agent` | Agent contact info (email, phones, office) by name, MLS ID or office, plus their last-12-month activity in the service area. In-house use only. |
+| `find_listings_by_status` | Prospecting lists: listings in chosen cities or ZIP codes by status (expired, canceled, withdrawn, stale actives, ...), filtered by price, the date the listing reached its status, days on market and price cuts. Expired/canceled listings whose address has since been relisted or sold are left out. 25 per page, up to `STATUS_SEARCH_MAX_TOTAL` per search. In-house use only. |
 | `sync_status` | How current the data is, record counts, recent usage |
 
 The Listing Portal can call the same tools at `POST /api/tools/<tool name>` with the same key.
@@ -55,6 +56,7 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 | `AI_ACCESS_ENABLED` | `true` | Set to `false` to cut off Claude's access immediately (the Listing Portal API keeps working) |
 | `KEY_PREFIX` | `MRD` | MLS Grid prefix on MRED key fields, removed before display |
 | `MAX_RESULTS` | `25` | Most listings any one search returns |
+| `STATUS_SEARCH_MAX_TOTAL` | `200` | Most results one `find_listings_by_status` search can page through (25 per page) |
 | `SYNC_PAGE_SIZE` / `SYNC_MAX_PAGES` | `5000` / `10` | Records per request / requests per 15-minute run (at most 40 requests an hour) |
 | `INITIAL_IMPORT_MAX_PAGES` | `10` | Requests per run during the first import only. Raise to `300` while MLS Grid has granted a grace period; afterwards runs drop back to `SYNC_MAX_PAGES` automatically. |
 | `ALLOW_LARGER_REQUESTS` | `false` | Whether to retry with bigger full-record downloads if MLS Grid rejects the slim request |
@@ -65,6 +67,14 @@ You'll need: your MLS Grid access token, a Cloudflare account, and about 30 minu
 - If the MLS Grid subscription doesn't include those resources, listings keep syncing normally and `sync_status` shows the error under `agent_roster`.
 - **One-time backfill.** Listings stored before agent IDs were added are re-downloaded once, on their own checkpoint, using whatever request budget is left each run (about 7 of the 10 requests per run). It runs alongside the normal sync and finishes on its own; `sync_status` shows `listing_agent_ids: complete` when done. To speed it up, an admin can `POST /admin/sync?pages=50`.
 - Activity counts in `find_agent` cover only the stored service-area listings.
+
+## Prospecting searches (`find_listings_by_status`)
+
+- **Status date.** Each listing stores the date it reached its current status (MLS Grid `StatusChangeTimestamp`, else `OffMarketDate`). If the MLS sends neither, the listing's last-modified date stands in. "Expired in the last 90 days" uses this date.
+- **One-time backfill.** Version 0.3.0 adds the status date, so existing listings are re-downloaded once on the same paced backfill used for agent IDs (it uses the request budget left over each run and finishes on its own). `sync_status` shows `status_dates: complete` when done; until then results carry a note and fall back to the last-modified date.
+- **Relisted or sold:** an expired, canceled, withdrawn or held listing is left out when the same address has a newer active, pending or closed listing. Pass `include_relisted: true` to keep them.
+- **Canceled is not the same as expired.** A canceled or withdrawn listing can still be under a listing agreement with the listing brokerage, so results include a reminder to confirm the agreement has ended before contacting the owner.
+- **Caps:** 25 results per page, and paging stops at `STATUS_SEARCH_MAX_TOTAL` (200) per search, so the feed can't be copied through the tool. A city or ZIP is required.
 
 ## How the valuation works
 

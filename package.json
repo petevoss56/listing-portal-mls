@@ -1,6 +1,6 @@
 {
   "name": "listing-portal-mls",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "MLS Grid (MRED) sync and comp-search connector for the 3% Listing Co. Listing Portal and Claude.",
   "type": "module",
